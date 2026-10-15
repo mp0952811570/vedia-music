@@ -1,226 +1,102 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-Hant">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Vedia Music</title>
-  <link rel="manifest" href="manifest.json">
-  <meta name="theme-color" content="#1976d2">
-  <style>
-    body {font-family: system-ui, sans-serif; margin:0; padding:1rem; background:#fafafa; color:#222;}
-    h1 {text-align:center;}
-    #player {max-width:480px; margin:2rem auto; background:#fff; padding:1.5rem; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,.1);}
-    audio {width:100%; margin:1rem 0;}
-    #controls {display:flex; justify-content:center; gap:1rem; margin-top:1rem;}
-    button {background:#1976d2; color:#fff; border:none; padding:0.5rem 1rem; border-radius:4px; cursor:pointer;}
-    button:hover {background:#1565c0;}
-    #status {margin-top:1rem; font-size:0.9rem; color:#666; text-align:center;}
-    #searchBar {margin-top:1rem; display:flex; gap:0.5rem; flex-wrap:wrap;}
-    #searchBar input {flex:1; min-width:120px; padding:0.5rem; border:1px #ccc solid; border-radius:4px;}
-    #searchBar button {padding:0.5rem 1rem;}
-    #lyrics {margin-top:1.5rem; line-height:1.6; font-size:1.2rem; max-height:300px; overflow-y:auto; padding:1rem; background:#eee; border-radius:8px;}
-    .lyric-line {margin:0.4rem 0; padding:0.2rem; transition:background .2s;}
-    .active {background:#fff3cd; font-weight:bold;}
-    #translation {margin-top:1rem; font-size:1rem; color:#555;}
-  </style>
+  <meta name="description" content="Vedia Music — Music lives here">
+  <meta name="theme-color" content="#071530">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Vedia">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/icon-32.png">
+  <link rel="apple-touch-icon" href="/icons/icon-180.png">
+  <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <h1>Vedia Music</h1>
-  <div id="searchBar">
-    <input type="text" id="searchInput" placeholder="Search YouTube Music...">
-    <button id="searchBtn">Search</button>
-  </div>
-  <div id="player">
-    <audio id="audio" preload="none"></audio>
-    <div id="controls">
-      <button id="prev">⏮️</button>
-      <button id="play">▶️</button>
-      <button id="next">⏭️</button>
+  <header class="topbar">
+    <img src="/icons/logo-mark.png" alt="" class="brand-mark">
+    <span class="brand">Vedia</span>
+    <form id="searchForm" class="search" autocomplete="off">
+      <input id="searchInput" type="search" enterkeyhint="search" placeholder="搜尋歌曲、歌手…">
+    </form>
+  </header>
+
+  <nav class="tabs">
+    <button data-tab="search" class="on">搜尋</button>
+    <button data-tab="queue">播放佇列</button>
+    <button data-tab="liked">收藏</button>
+    <button data-tab="history">最近播放</button>
+  </nav>
+
+  <main id="list" class="list"></main>
+
+  <footer id="mini" class="mini hidden">
+    <div class="mini-progress"><div id="miniBar"></div></div>
+    <div class="mini-row">
+      <img id="miniCover" alt="">
+      <div class="mini-meta" id="miniOpen">
+        <div id="miniTitle" class="t1"></div>
+        <div id="miniArtist" class="t2"></div>
+      </div>
+      <button id="miniPlay" class="icon-btn" aria-label="播放/暫停"></button>
+      <button id="miniNext" class="icon-btn" aria-label="下一首"></button>
     </div>
-    <div id="status">Ready</div>
-  </div>
-  <div id="lyrics"></div>
-  <div id="translation"></div>
+  </footer>
 
-  <script type="module">
-    const audio = document.getElementById('audio');
-    const lyricsDiv = document.getElementById('lyrics');
-    const translationDiv = document.getElementById('translation');
-    const statusDiv = document.getElementById('status');
-    const playBtn = document.getElementById('play');
-    const prevBtn = document.getElementById('prev');
-    const nextBtn = document.getElementById('next');
-    const searchInput = document.getElementById('searchInput');
-    const searchBtn = document.getElementById('searchBtn');
+  <section id="full" class="full" aria-hidden="true">
+    <div class="full-bg" id="fullBg"></div>
+    <div class="full-inner">
+      <div class="full-head">
+        <button id="fullClose" class="icon-btn" aria-label="收起"></button>
+        <div class="seg">
+          <button data-view="cover" class="on">歌曲</button>
+          <button data-view="lyrics">歌詞</button>
+        </div>
+        <button id="likeBtn" class="icon-btn" aria-label="收藏"></button>
+      </div>
 
-    let tracks = []; // array of {videoId, title, artist, thumbnail}
-    let currentIndex = 0;
+      <div class="views">
+        <div class="view-cover on" id="viewCover">
+          <img id="fullCover" alt="">
+          <div class="mini-lyric" id="miniLyric"></div>
+        </div>
+        <div class="view-lyrics" id="viewLyrics">
+          <div class="lyrics" id="lyrics"></div>
+          <div class="lyric-tools">
+            <button id="offMinus">-0.5s</button>
+            <span id="offVal">0.0s</span>
+            <button id="offPlus">+0.5s</button>
+            <button id="transBtn">翻譯</button>
+          </div>
+        </div>
+      </div>
 
-    // Helper: format seconds to MM:SS
-    function formatTime(sec) {
-      const m = Math.floor(sec / 60);
-      const s = Math.floor(sec % 60);
-      return `${m}:${s.toString().padStart(2,'0')}`;
-    }
+      <div class="full-meta">
+        <div id="fullTitle" class="t1"></div>
+        <div id="fullArtist" class="t2"></div>
+      </div>
 
-    // Fetch search results from backend
-    async function searchTracks(query) {
-      statusDiv.textContent = `Searching…`;
-      try {
-        const resp = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
-        if (!resp.ok) throw new Error(`Search failed: ${resp.status}`);
-        const data = await resp.json();
-        tracks = data.items.map(item => ({
-          videoId: item.id.videoId,
-          title: item.snippet.title,
-          artist: item.snippet.channelTitle,
-          thumbnail: item.snippet.thumbnails.medium.url
-        }));
-        if (tracks.length === 0) {
-          statusDiv.textContent = 'No results';
-          return;
-        }
-        currentIndex = 0;
-        await loadTrack(currentIndex);
-      } catch (e) {
-        console.error(e);
-        statusDiv.textContent = 'Search error';
-      }
-    }
+      <div class="seekwrap">
+        <input id="seek" type="range" min="0" max="1000" value="0" aria-label="進度">
+        <div class="times"><span id="tCur">0:00</span><span id="tDur">0:00</span></div>
+      </div>
 
-    // Load a track by index: set audio src, fetch lyrics, update UI
-    async function loadTrack(idx) {
-      if (!tracks[idx]) return;
-      const t = tracks[idx];
-      statusDiv.textContent = `Loading ${t.title}…`;
-      // Set audio source to our proxy endpoint
-      audio.src = `/api/audio/${t.videoId}`;
-      // Reset audio
-      audio.removeAttribute('loop');
-      audio.load();
-      // Wait for metadata to get duration etc.
-      await new Promise((resolve, reject) => {
-        audio.oncanplaythrough = resolve;
-        audio.onerror = reject;
-      });
-      // Fetch lyrics and translation
-      try {
-        const lyricResp = await fetch(`/api/lyrics?videoId=${t.videoId}`);
-        const lyricData = await lyricResp.ok ? await lyricResp.json() : {lyrics:'', translation:''};
-        // Parse LRC if available
-        let lrcLines = [];
-        if (lyricData.lrc) {
-          lrcLines = parseLRC(lyricData.lrc);
-        } else if (lyricData.lyrics) {
-          // fallback: create dummy LRC from plain lyrics (5 sec per line)
-          const lines = lyricData.lyrics.split('\n').filter(l=>l.trim()!=='');
-          lrcLines = lines.map((line,i)=> {
-            const time = i * 5;
-            const mm = String(Math.floor(time/60)).padStart(2,'0');
-            const ss = String(time%60).padStart(2,'0');
-            return `[${mm}:${ss}.00]${line}`;
-          }).join('\n');
-          lrcLines = parseLRC(lrcLines);
-        }
-        renderLyrics(lrcLines, lyricData.translation || '');
-      } catch (e) {
-        console.error('Lyrics fetch error', e);
-        renderLyrics([], '');
-      }
-      // Update media session
-      if ('mediaSession' in navigator) {
-        navigator.mediaSession.metadata = new MediaMetadata({
-          title: t.title,
-          artist: t.artist,
-          album: 'Vedia Music',
-          artwork: [{src: t.thumbnail, sizes: '96x96', type: 'image/png'}]
-        });
-        navigator.mediaSession.setActionHandler('play', () => play());
-        navigator.mediaSession.setActionHandler('pause', () => pause());
-        navigator.mediaSession.setActionHandler('previoustrack', () => prevTrack());
-        navigator.mediaSession.setActionHandler('nexttrack', () => nextTrack());
-      }
-      statusDiv.textContent = '';
-    }
+      <div class="controls">
+        <button id="shuffleBtn" class="icon-btn sm off" aria-label="隨機"></button>
+        <button id="prevBtn" class="icon-btn" aria-label="上一首"></button>
+        <button id="playBtn" class="play-btn" aria-label="播放/暫停"></button>
+        <button id="nextBtn" class="icon-btn" aria-label="下一首"></button>
+        <button id="repeatBtn" class="icon-btn sm off" aria-label="重複"></button>
+      </div>
+      <div class="status" id="status"></div>
+    </div>
+  </section>
 
-    function renderLyrics(lrcLines, translationText) {
-      lyricsDiv.innerHTML = '';
-      translationDiv.innerHTML = '';
-      lrcLines.forEach(line => {
-        const p = document.createElement('p');
-        p.className = 'lyric-line';
-        p.dataset.start = line.time;
-        p.textContent = line.text;
-        lyricsDiv.appendChild(p);
-      });
-      if (translationText) {
-        const p = document.createElement('p');
-        p.textContent = translationText;
-        translationDiv.appendChild(p);
-      }
-    }
-
-    function updateHighlight() {
-      const ct = audio.currentTime;
-      const lines = lyricsDiv.querySelectorAll('.lyric-line');
-      let active = null;
-      lines.forEach(line => {
-        const start = parseFloat(line.dataset.start);
-        if (start <= ct) active = line;
-      });
-      lines.forEach(l => l.classList.toggle('active', l === active));
-      if (active) active.scrollIntoView({block: 'nearest'});
-    }
-
-    function play() { audio.play(); playBtn.textContent = '⏸️'; }
-    function pause() { audio.pause(); playBtn.textContent = '▶️'; }
-    function prevTrack() {
-      currentIndex = (currentIndex - 1 + tracks.length) % tracks.length;
-      loadTrack(currentIndex);
-    }
-    function nextTrack() {
-      currentIndex = (currentIndex + 1) % tracks.length;
-      loadTrack(currentIndex);
-    }
-
-    playBtn.addEventListener('click', () => {
-      if (audio.paused) {
-        play();
-      } else {
-        pause();
-      }
-    });
-    prevBtn.addEventListener('click', prevTrack);
-    nextBtn.addEventListener('click', nextTrack);
-    audio.addEventListener('timeupdate', updateHighlight);
-    audio.addEventListener('ended', () => {
-      pause();
-      // optionally auto-next
-      // nextTrack();
-    });
-
-    searchBtn.addEventListener('click', () => {
-      const query = searchInput.value.trim();
-      if (query) searchTracks(query);
-    });
-    searchInput.addEventListener('keypress', e => {
-      if (e.key === 'Enter') searchTracks(query);
-    });
-
-    // Install PWA
-    let deferredPrompt;
-    window.addEventListener('beforeinstallprompt', e => {
-      e.preventDefault();
-      deferredPrompt = e;
-      // Optionally show an in-app install button
-    });
-
-    // Initial load: if no tracks, load a sample
-    if (tracks.length === 0) {
-      // Use a known video ID for testing
-      tracks = [{videoId: 'dQw4w9WgXcQ', title: 'Never Gonna Give You Up', artist: 'Rick Astley', thumbnail: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg'}];
-      loadTrack(0);
-    }
-  </script>
+  <div id="toast" class="toast"></div>
+  <audio id="audio" preload="auto" playsinline></audio>
+  <script src="/app.js" type="module"></script>
 </body>
 </html>
