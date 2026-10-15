@@ -21,7 +21,7 @@ const ID_RE = /^[A-Za-z0-9_-]{11}$/;
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json({ limit: '200kb' }));
+app.use((req, res, next) => (req.path === '/api/library' ? next() : express.json({ limit: '200kb' })(req, res, next)));
 
 if (ACCESS_KEY) {
   app.use('/api', (req, res, next) => {
@@ -288,6 +288,56 @@ app.post('/api/translate', async (req, res) => {
   } catch (e) {
     console.error('translate', e.message);
     res.status(502).json({ error: 'translate failed' });
+  }
+});
+
+// ---------- Import a YouTube / YouTube Music playlist ----------
+app.get('/api/ytplaylist', async (req, res) => {
+  const raw = String(req.query.url || '').trim();
+  const m = raw.match(/[?&]list=([A-Za-z0-9_-]+)/) || raw.match(/^(?:VL)?((?:PL|OLAK5uy_|RD|LL|FL|UU)[A-Za-z0-9_-]+)$/);
+  if (!m) return res.status(400).json({ error: 'no playlist id' });
+  const id = m[1].replace(/^VL/, '');
+  try {
+    const y = await getYtm();
+    let name = '';
+    try { name = (await y.getPlaylist(id)).name || ''; } catch {}
+    const vids = await y.getPlaylistVideos(id);
+    res.json({
+      name,
+      items: vids.filter(v => v.videoId && ID_RE.test(v.videoId)).slice(0, 1000).map(v => ({
+        id: v.videoId,
+        title: v.name || '',
+        artist: v.artist?.name || '',
+        album: '',
+        duration: v.duration || 0,
+        cover: `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
+      })),
+    });
+  } catch (e) {
+    console.error('ytplaylist', id, e.message);
+    res.status(502).json({ error: 'import failed' });
+  }
+});
+
+// ---------- Library (liked + playlists) saved on the server ----------
+const LIB_FILE = process.env.LIBRARY_FILE || path.join(__dirname, 'data', 'library.json');
+function readLib() {
+  try { return JSON.parse(fs.readFileSync(LIB_FILE, 'utf8')); } catch { return { liked: [], playlists: [], updatedAt: 0 }; }
+}
+app.get('/api/library', (req, res) => res.json(readLib()));
+app.put('/api/library', express.json({ limit: '8mb' }), (req, res) => {
+  const b = req.body || {};
+  if (!Array.isArray(b.liked) || !Array.isArray(b.playlists)) return res.status(400).json({ error: 'bad body' });
+  const lib = { liked: b.liked.slice(0, 5000), playlists: b.playlists.slice(0, 500), updatedAt: Number(b.updatedAt) || Date.now() };
+  try {
+    fs.mkdirSync(path.dirname(LIB_FILE), { recursive: true });
+    const tmp = LIB_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(lib));
+    fs.renameSync(tmp, LIB_FILE);
+    res.json({ ok: true, updatedAt: lib.updatedAt });
+  } catch (e) {
+    console.error('library save', e.message);
+    res.status(500).json({ error: 'save failed' });
   }
 });
 

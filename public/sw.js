@@ -1,7 +1,7 @@
 // Vedia Music service worker
 // App shell: network-first (so updates land immediately), cache fallback when offline.
 // /api/* and audio streams are never cached here (audio needs Range requests).
-const VERSION = 'vedia-v2';
+const VERSION = 'vedia-v3';
 const SHELL = [
   '/', '/index.html', '/style.css', '/app.js', '/manifest.json',
   '/icons/icon-192.png', '/icons/icon-512.png', '/icons/logo-mark.png', '/icons/icon-180.png',

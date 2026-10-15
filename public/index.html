@@ -26,8 +26,9 @@
 
   <nav class="tabs">
     <button data-tab="search" class="on">搜尋</button>
-    <button data-tab="queue">播放佇列</button>
+    <button data-tab="playlists">歌單</button>
     <button data-tab="liked">收藏</button>
+    <button data-tab="queue">播放佇列</button>
     <button data-tab="history">最近播放</button>
   </nav>
 
@@ -55,7 +56,10 @@
           <button data-view="cover" class="on">歌曲</button>
           <button data-view="lyrics">歌詞</button>
         </div>
-        <button id="likeBtn" class="icon-btn" aria-label="收藏"></button>
+        <div class="head-right">
+          <button id="addPlBtn" class="icon-btn sm" aria-label="加入歌單"></button>
+          <button id="likeBtn" class="icon-btn" aria-label="收藏"></button>
+        </div>
       </div>
 
       <div class="views">

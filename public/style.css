@@ -132,6 +132,24 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .play-btn svg { width: 34px; height: 34px; fill: currentColor; }
 .status { min-height: 18px; text-align: center; font-size: 12px; color: var(--sub); margin-top: 8px; }
 
+/* playlists */
+.head-right { display: flex; align-items: center; }
+.pl-actions { display: flex; gap: 8px; flex-wrap: wrap; padding: 8px 6px 10px; }
+.pl-actions button { padding: 8px 14px; border-radius: 18px; background: var(--bg2); border: 1px solid var(--line); font-size: 14px; }
+.pl-actions button.primary { background: var(--accent); border-color: var(--accent); color: #04142c; font-weight: 600; }
+.pl-head { padding: 4px 6px 0; }
+.pl-head .link { color: var(--accent); font-size: 14px; padding: 6px 0; }
+.pl-title { font-size: 22px; font-weight: 700; margin: 4px 0 2px; word-break: break-word; }
+.pl-row .chev { color: var(--sub); font-size: 22px; padding: 0 6px; }
+.row.edit { gap: 8px; }
+.mini-btn { width: 36px; height: 36px; border-radius: 50%; background: var(--bg2); font-size: 16px; flex: none; }
+.mini-btn:disabled { opacity: .3; }
+.mini-btn.danger { color: #ff7a8a; }
+.sheet button small { float: right; color: var(--sub); font-size: 13px; }
+.sheet button.accent { color: var(--accent2); font-weight: 600; }
+.sheet button.danger { color: #ff7a8a; }
+.sheet-scroll { max-height: 55vh; overflow-y: auto; }
+
 .toast { position: fixed; left: 50%; bottom: calc(110px + var(--safe-b)); transform: translateX(-50%) translateY(20px); background: rgba(16,38,79,.97); color: var(--text); padding: 10px 18px; border-radius: 20px; font-size: 14px; opacity: 0; pointer-events: none; transition: .25s; z-index: 50; max-width: 86vw; text-align: center; }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 

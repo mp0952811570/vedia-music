@@ -14,8 +14,9 @@ const I = {
   shuffle: '<svg viewBox="0 0 24 24"><path d="M10.6 9.2L5.4 4 4 5.4l5.2 5.2 1.4-1.4zM14.5 4l2 2L4 18.6 5.4 20 18 7.5l2 2V4h-5.5zm.3 9.4l-1.4 1.4 3.1 3.1-2 2.1H20v-5.5l-2 2-3.2-3.1z"/></svg>',
   repeat: '<svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>',
   repeat1: '<svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z"/></svg>',
+  plAdd: '<svg viewBox="0 0 24 24"><path d="M3 6h12v2H3V6zm0 4h12v2H3v-2zm0 4h8v2H3v-2zm14-4h2v3h3v2h-3v3h-2v-3h-3v-2h3v-3z"/></svg>',
 };
-const setIcon = (el, name) => { el.innerHTML = I[name]; };
+const setIcon = (el, name) => { if (el) el.innerHTML = I[name]; };
 
 // ---------- storage ----------
 const store = {
@@ -31,7 +32,7 @@ async function api(url, opts) {
   const r = await fetch(withKey(url), opts);
   if (r.status === 401) {
     const k = prompt('請輸入 Vedia Music 通行碼');
-    if (k) { KEY = k; store.set('key', k); return api(url, opts); }
+    if (k) { KEY = k.trim(); store.set('key', KEY); return api(url, opts); }
   }
   if (!r.ok) throw new Error('HTTP ' + r.status);
   return r.json();
@@ -41,32 +42,76 @@ async function api(url, opts) {
 const S = {
   queue: store.get('queue', []),
   index: store.get('index', -1),
-  liked: store.get('liked', []),
   history: store.get('history', []),
   shuffle: store.get('shuffle', false),
   repeat: store.get('repeat', 'off'), // off | all | one
   offsets: store.get('offsets', {}),
   translate: store.get('translate', false),
+  autoRadio: store.get('autoRadio', true),
+  liked: store.get('liked', []),
+  playlists: store.get('playlists', []), // [{id, name, tracks, created, updated}]
+  libUpdated: store.get('libUpdated', 0),
   results: [],
   tab: 'search',
-  lyrics: null, // {lines:[{t,text,tr}], plain, id}
-  autoRadio: true,
+  openPl: null,
+  editPl: false,
+  lyrics: null, // {id, lines:[{t,text,tr}], plain}
 };
 const cur = () => S.queue[S.index];
 const persist = () => {
-  store.set('queue', S.queue.slice(0, 300));
+  store.set('queue', S.queue.slice(0, 500));
   store.set('index', S.index);
-  store.set('liked', S.liked);
   store.set('history', S.history.slice(0, 100));
   store.set('shuffle', S.shuffle);
   store.set('repeat', S.repeat);
   store.set('offsets', S.offsets);
   store.set('translate', S.translate);
+  store.set('autoRadio', S.autoRadio);
 };
+
+// ---------- library sync (liked + playlists are also saved on the server) ----------
+let pushT = null;
+function persistLib() {
+  S.libUpdated = Date.now();
+  store.set('liked', S.liked);
+  store.set('playlists', S.playlists);
+  store.set('libUpdated', S.libUpdated);
+  store.set('libDirty', true);
+  clearTimeout(pushT);
+  pushT = setTimeout(pushLibrary, 700);
+}
+async function pushLibrary() {
+  try {
+    await api('/api/library', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ liked: S.liked, playlists: S.playlists, updatedAt: S.libUpdated }),
+    });
+    store.set('libDirty', false);
+  } catch {}
+}
+async function pullLibrary() {
+  try {
+    const d = await api('/api/library');
+    const serverAt = d.updatedAt || 0;
+    const dirty = store.get('libDirty', false);
+    const localHas = S.liked.length || S.playlists.length;
+    const serverHas = (d.liked || []).length || (d.playlists || []).length;
+    if ((serverAt > S.libUpdated && !dirty) || (!localHas && serverHas)) {
+      S.liked = d.liked || []; S.playlists = d.playlists || []; S.libUpdated = serverAt;
+      store.set('liked', S.liked); store.set('playlists', S.playlists); store.set('libUpdated', serverAt);
+      if (S.openPl && !getPl(S.openPl)) S.openPl = null;
+      syncLike(); render();
+    } else if (localHas && (dirty || S.libUpdated > serverAt)) {
+      pushLibrary();
+    }
+  } catch {}
+}
 
 // ---------- helpers ----------
 const fmt = s => { s = Math.max(0, Math.floor(s || 0)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const cleanT = t => ({ id: t.id, title: t.title || '', artist: t.artist || '', album: t.album || '', duration: t.duration || 0, cover: t.cover || '' });
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 let toastT;
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
@@ -74,6 +119,95 @@ function toast(msg) {
 }
 const status = msg => { $('#status').textContent = msg || ''; };
 const isLiked = id => S.liked.some(x => x.id === id);
+
+// generic bottom sheet; onPick receives the clicked button's dataset
+function sheet(html, onPick) {
+  const bg = document.createElement('div'); bg.className = 'sheet-bg';
+  const sh = document.createElement('div'); sh.className = 'sheet'; sh.innerHTML = html;
+  const close = () => { bg.remove(); sh.remove(); };
+  bg.onclick = close;
+  sh.onclick = e => {
+    const b = e.target.closest('button'); if (!b) return;
+    close();
+    if (!b.hasAttribute('data-x')) onPick({ ...b.dataset });
+  };
+  document.body.append(bg, sh);
+}
+
+// ---------- playlists ----------
+const getPl = id => S.playlists.find(p => p.id === id);
+function dedupe(tracks) {
+  const seen = new Set();
+  return tracks.filter(t => t && t.id && !seen.has(t.id) && seen.add(t.id)).map(cleanT);
+}
+function createPlaylist(name, tracks = []) {
+  const p = { id: uid(), name: String(name).trim().slice(0, 100) || '未命名歌單', tracks: dedupe(tracks), created: Date.now(), updated: Date.now() };
+  S.playlists.unshift(p);
+  persistLib();
+  return p;
+}
+function addToPlaylist(p, tracks) {
+  const have = new Set(p.tracks.map(t => t.id));
+  const add = dedupe(tracks).filter(t => !have.has(t.id));
+  p.tracks.push(...add);
+  p.updated = Date.now();
+  persistLib();
+  return add.length;
+}
+function pickPlaylist(tracks) {
+  tracks = tracks.filter(Boolean);
+  if (!tracks.length) return;
+  const rows = S.playlists.map((p, i) => `<button data-p="${i}">${esc(p.name)}<small>${p.tracks.length} 首</small></button>`).join('');
+  sheet(`<div class="sheet-title">加入歌單${tracks.length > 1 ? `（${tracks.length} 首）` : `：${esc(tracks[0].title)}`}</div>
+    <div class="sheet-scroll"><button data-p="new" class="accent">＋ 新增歌單</button>${rows}</div><button data-x>取消</button>`, d => {
+    let p;
+    if (d.p === 'new') {
+      const name = prompt('新歌單名稱');
+      if (!name || !name.trim()) return;
+      p = createPlaylist(name);
+    } else p = S.playlists[Number(d.p)];
+    if (!p) return;
+    const n = addToPlaylist(p, tracks);
+    toast(n ? `已加入「${p.name}」${tracks.length > 1 ? `（${n} 首）` : ''}` : '歌曲已在這個歌單裡');
+    render();
+  });
+}
+function plMenu(p) {
+  if (!p) return;
+  sheet(`<div class="sheet-title">${esc(p.name)}</div>
+    <button data-a="rename">重新命名</button>
+    <button data-a="queue">全部加到播放佇列</button>
+    <button data-a="del" class="danger">刪除歌單</button>
+    <button data-x>取消</button>`, d => {
+    if (d.a === 'rename') {
+      const n = prompt('歌單名稱', p.name);
+      if (n && n.trim()) { p.name = n.trim().slice(0, 100); p.updated = Date.now(); persistLib(); render(); }
+    }
+    if (d.a === 'queue') {
+      S.queue.push(...p.tracks.map(cleanT)); persist();
+      toast(`已加入 ${p.tracks.length} 首到佇列`);
+      if (S.index < 0 && S.queue.length) playIndex(0);
+    }
+    if (d.a === 'del' && confirm(`確定刪除歌單「${p.name}」？`)) {
+      S.playlists = S.playlists.filter(x => x.id !== p.id);
+      S.openPl = null; S.editPl = false;
+      persistLib(); render(); toast('已刪除歌單');
+    }
+  });
+}
+async function importPlaylist() {
+  const url = prompt('貼上 YouTube 或 YouTube Music 的歌單網址');
+  if (!url || !url.trim()) return;
+  toast('匯入中…');
+  try {
+    const d = await api('/api/ytplaylist?url=' + encodeURIComponent(url.trim()));
+    if (!d.items || !d.items.length) { toast('這個歌單沒有可播放的歌曲'); return; }
+    const p = createPlaylist(d.name || '匯入的歌單', d.items);
+    S.openPl = p.id; S.editPl = false;
+    render(); window.scrollTo(0, 0);
+    toast(`已匯入 ${p.tracks.length} 首`);
+  } catch { toast('匯入失敗：請確認是公開或「不公開」的歌單網址'); }
+}
 
 // ---------- list rendering ----------
 function rowHTML(t, i, ctx) {
@@ -85,15 +219,62 @@ function rowHTML(t, i, ctx) {
     <button class="more" data-more="${i}" aria-label="更多">⋯</button>
   </div>`;
 }
+function editRowHTML(t, i, n) {
+  return `<div class="row edit" data-i="${i}" data-ctx="edit">
+    <img loading="lazy" src="${esc(t.cover)}" alt="" onerror="this.style.visibility='hidden'">
+    <div class="meta"><div class="t1">${esc(t.title)}</div><div class="t2">${esc(t.artist)}</div></div>
+    <button class="mini-btn" data-mv="-1" ${i === 0 ? 'disabled' : ''} aria-label="上移">↑</button>
+    <button class="mini-btn" data-mv="1" ${i === n - 1 ? 'disabled' : ''} aria-label="下移">↓</button>
+    <button class="mini-btn danger" data-rm aria-label="移除">✕</button>
+  </div>`;
+}
 function listFor(tab) {
   if (tab === 'search') return S.results;
   if (tab === 'queue') return S.queue;
   if (tab === 'liked') return S.liked;
   if (tab === 'history') return S.history;
+  if (tab === 'pl') return getPl(S.openPl)?.tracks || [];
   return [];
+}
+function renderPlList(el) {
+  const head = `<div class="pl-actions"><button id="plNew" class="primary">＋ 新增歌單</button><button id="plImport">匯入 YouTube 歌單</button></div>`;
+  if (!S.playlists.length) {
+    el.innerHTML = head + `<div class="empty"><small>還沒有歌單<br>可以新增歌單，或貼上 YouTube / YouTube Music 的歌單網址匯入</small></div>`;
+    return;
+  }
+  el.innerHTML = head + S.playlists.map(p => {
+    const cover = p.tracks.find(t => t.cover)?.cover || '/icons/icon-192.png';
+    return `<div class="row pl-row" data-pl="${esc(p.id)}">
+      <img loading="lazy" src="${esc(cover)}" alt="">
+      <div class="meta"><div class="t1">${esc(p.name)}</div><div class="t2">${p.tracks.length} 首</div></div>
+      <span class="chev">›</span></div>`;
+  }).join('');
+}
+function renderPlDetail(el, p) {
+  const total = p.tracks.reduce((a, t) => a + (t.duration || 0), 0);
+  const head = `<div class="pl-head">
+    <button id="plBack" class="link">‹ 所有歌單</button>
+    <div class="pl-title">${esc(p.name)}</div>
+    <div class="t2">${p.tracks.length} 首${total ? ' · ' + Math.round(total / 60) + ' 分鐘' : ''}</div>
+    <div class="pl-actions">
+      <button id="plPlay" class="primary">▶ 播放</button>
+      <button id="plShuffle">隨機播放</button>
+      <button id="plEdit">${S.editPl ? '完成' : '編輯'}</button>
+      <button id="plMore" aria-label="更多">⋯</button>
+    </div></div>`;
+  const body = p.tracks.length
+    ? p.tracks.map((t, i) => (S.editPl ? editRowHTML(t, i, p.tracks.length) : rowHTML(t, i, 'pl'))).join('')
+    : `<div class="empty"><small>歌單是空的<br>在任何歌曲右邊的「⋯」選「加入歌單…」</small></div>`;
+  el.innerHTML = head + body;
 }
 function render() {
   const el = $('#list');
+  if (S.tab === 'playlists') {
+    const p = S.openPl && getPl(S.openPl);
+    if (p) return renderPlDetail(el, p);
+    S.openPl = null;
+    return renderPlList(el);
+  }
   const items = listFor(S.tab);
   if (S.tab === 'search' && !items.length) {
     el.innerHTML = `<div class="empty"><img src="/icons/icon-192.png" alt=""><p>MUSIC LIVES HERE</p><small>輸入歌名或歌手開始聽歌</small></div>`;
@@ -104,52 +285,108 @@ function render() {
     return;
   }
   let head = '';
-  if (S.tab === 'queue') head = `<div class="section-title"><span>${items.length} 首 · 自動接續推薦歌曲</span><button id="clearQ">清空</button></div>`;
-  if (S.tab === 'liked') head = `<div class="section-title"><span>${items.length} 首</span><button id="playAllLiked">全部播放</button></div>`;
+  if (S.tab === 'queue') head = `<div class="section-title"><span>${items.length} 首${S.autoRadio ? ' · 自動接推薦歌曲' : ''}</span><span><button id="saveQ">存成歌單</button>　<button id="clearQ">清空</button></span></div>`;
+  if (S.tab === 'liked') head = `<div class="section-title"><span>${items.length} 首</span><span><button id="likedToPl">存成歌單</button>　<button id="playAllLiked">全部播放</button></span></div>`;
   el.innerHTML = head + items.map((t, i) => rowHTML(t, i, S.tab)).join('');
 }
 
 $('#list').addEventListener('click', e => {
-  if (e.target.id === 'clearQ') { const c = cur(); S.queue = c ? [c] : []; S.index = c ? 0 : -1; persist(); render(); return; }
-  if (e.target.id === 'playAllLiked') { playList(S.liked, 0); return; }
+  const id = e.target.id;
+  const p = S.openPl && getPl(S.openPl);
+  if (id === 'clearQ') { const c = cur(); S.queue = c ? [c] : []; S.index = c ? 0 : -1; persist(); render(); return; }
+  if (id === 'saveQ' || id === 'likedToPl') {
+    const src = id === 'saveQ' ? S.queue : S.liked;
+    const name = prompt('歌單名稱', id === 'saveQ' ? '我的佇列' : '我的收藏');
+    if (name && name.trim()) { const np = createPlaylist(name, src); toast(`已建立「${np.name}」（${np.tracks.length} 首）`); }
+    return;
+  }
+  if (id === 'playAllLiked') { playList(S.liked, 0); return; }
+  if (id === 'plNew') {
+    const name = prompt('新歌單名稱');
+    if (name && name.trim()) { const np = createPlaylist(name); S.openPl = np.id; S.editPl = false; render(); }
+    return;
+  }
+  if (id === 'plImport') { importPlaylist(); return; }
+  if (id === 'plBack') { S.openPl = null; S.editPl = false; render(); return; }
+  if (id === 'plPlay') { if (p && p.tracks.length) playList(p.tracks, 0); return; }
+  if (id === 'plShuffle') {
+    if (p && p.tracks.length) {
+      S.shuffle = true; persist(); syncModes();
+      playList(p.tracks, Math.floor(Math.random() * p.tracks.length));
+    }
+    return;
+  }
+  if (id === 'plEdit') { S.editPl = !S.editPl; render(); return; }
+  if (id === 'plMore') { plMenu(p); return; }
+
+  const plRow = e.target.closest('[data-pl]');
+  if (plRow) { S.openPl = plRow.dataset.pl; S.editPl = false; render(); window.scrollTo(0, 0); return; }
+
+  const mv = e.target.closest('[data-mv]');
+  const rm = e.target.closest('[data-rm]');
+  if ((mv || rm) && p) {
+    const i = Number(e.target.closest('.row').dataset.i);
+    if (rm) p.tracks.splice(i, 1);
+    else {
+      const j = i + Number(mv.dataset.mv);
+      if (j >= 0 && j < p.tracks.length) [p.tracks[i], p.tracks[j]] = [p.tracks[j], p.tracks[i]];
+    }
+    p.updated = Date.now(); persistLib(); render();
+    return;
+  }
+
   const more = e.target.closest('[data-more]');
   const row = e.target.closest('.row');
-  if (!row) return;
+  if (!row || row.dataset.ctx === 'edit') return;
+  const ctx = row.dataset.ctx;
   const i = Number(row.dataset.i);
-  const items = listFor(row.dataset.ctx);
-  if (more) { openSheet(items[i], row.dataset.ctx, i); return; }
-  if (row.dataset.ctx === 'queue') { playIndex(i); return; }
-  if (row.dataset.ctx === 'search') { playList([items[i]], 0, true); return; }
-  playList(items, i);
+  const items = listFor(ctx);
+  if (!items[i]) return;
+  if (more) { openSheet(items[i], ctx, i); return; }
+  if (ctx === 'queue') playIndex(i);
+  else if (ctx === 'search') playList([items[i]], 0, true);
+  else playList(items, i);
 });
 
-// action sheet
+// track action sheet
 function openSheet(t, ctx, i) {
-  const bg = document.createElement('div'); bg.className = 'sheet-bg';
-  const sh = document.createElement('div'); sh.className = 'sheet';
-  sh.innerHTML = `<div class="sheet-title">${esc(t.title)} — ${esc(t.artist)}</div>
+  sheet(`<div class="sheet-title">${esc(t.title)} — ${esc(t.artist)}</div>
     <button data-a="next">下一首播放</button>
     <button data-a="add">加到佇列尾端</button>
+    <button data-a="pl">加入歌單…</button>
     <button data-a="radio">以此歌開始電台</button>
     <button data-a="like">${isLiked(t.id) ? '取消收藏' : '加入收藏'}</button>
-    ${ctx === 'queue' ? '<button data-a="rm">從佇列移除</button>' : ''}
-    <button data-a="x">取消</button>`;
-  const close = () => { bg.remove(); sh.remove(); };
-  bg.onclick = close;
-  sh.onclick = e => {
-    const a = e.target.dataset.a; if (!a) return;
-    if (a === 'next') { S.queue.splice(S.index + 1, 0, t); if (S.index < 0) S.index = -1; toast('將在下一首播放'); if (S.index < 0) playIndex(0); }
-    if (a === 'add') { S.queue.push(t); toast('已加到佇列'); if (S.index < 0) playIndex(0); }
+    ${ctx === 'queue' ? '<button data-a="rmq" class="danger">從佇列移除</button>' : ''}
+    ${ctx === 'pl' ? '<button data-a="rmpl" class="danger">從這個歌單移除</button>' : ''}
+    <button data-x>取消</button>`, d => {
+    const a = d.a;
+    if (a === 'next') {
+      if (S.index < 0) { S.queue = [cleanT(t)]; playIndex(0); }
+      else { S.queue.splice(S.index + 1, 0, cleanT(t)); toast('將在下一首播放'); }
+    }
+    if (a === 'add') {
+      S.queue.push(cleanT(t)); toast('已加到佇列');
+      if (S.index < 0) playIndex(S.queue.length - 1);
+    }
+    if (a === 'pl') { pickPlaylist([t]); return; }
     if (a === 'radio') playList([t], 0, true);
     if (a === 'like') toggleLike(t);
-    if (a === 'rm') { S.queue.splice(i, 1); if (i < S.index) S.index--; else if (i === S.index) { S.index--; next(); } }
-    persist(); render(); close();
-  };
-  document.body.append(bg, sh);
+    if (a === 'rmq') {
+      S.queue.splice(i, 1);
+      if (i < S.index) S.index--;
+      else if (i === S.index) { S.index--; next(); }
+    }
+    if (a === 'rmpl') {
+      const p = getPl(S.openPl);
+      if (p) { p.tracks.splice(i, 1); p.updated = Date.now(); persistLib(); toast('已從歌單移除'); }
+    }
+    persist(); render();
+  });
 }
 
 // tabs
 document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
+  if (b.dataset.tab === 'playlists' && S.tab === 'playlists') { S.openPl = null; S.editPl = false; }
   document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x === b));
   S.tab = b.dataset.tab; render(); window.scrollTo(0, 0);
 });
@@ -160,7 +397,8 @@ $('#searchForm').addEventListener('submit', async e => {
   const q = $('#searchInput').value.trim();
   if (!q) return;
   $('#searchInput').blur();
-  document.querySelector('.tabs button[data-tab=search]').click();
+  document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x.dataset.tab === 'search'));
+  S.tab = 'search';
   $('#list').innerHTML = '<div class="spinner"></div>';
   try {
     const d = await api('/api/search?q=' + encodeURIComponent(q));
@@ -172,9 +410,11 @@ $('#searchForm').addEventListener('submit', async e => {
 
 // ---------- playback ----------
 let loadToken = 0;
+// radio=true: search/radio mode, keeps adding recommended songs after the queue ends.
+// Playing a playlist / liked / history keeps exactly those songs.
 function playList(list, i, radio = false) {
-  S.queue = list.slice();
-  S.autoRadio = true;
+  S.queue = list.map(cleanT);
+  S.autoRadio = radio;
   playIndex(i);
   if (radio) fillRadio(list[i].id, true);
 }
@@ -201,11 +441,11 @@ function playIndex(i) {
   persist();
   updateMeta(t);
   status('載入中…');
+  audio.preload = 'auto';
   audio.src = withKey('/api/stream/' + t.id);
   audio.play().catch(err => { if (token === loadToken && err.name === 'NotAllowedError') status('點一下播放鍵開始'); });
   loadLyrics(t, token);
   render();
-  // keep the queue topped up for endless listening
   if (S.autoRadio && S.queue.length - S.index <= 3) fillRadio(t.id);
   else prefetchNext();
 }
@@ -328,8 +568,8 @@ if ('mediaSession' in navigator) {
 function toggleLike(t = cur()) {
   if (!t) return;
   if (isLiked(t.id)) { S.liked = S.liked.filter(x => x.id !== t.id); toast('已取消收藏'); }
-  else { S.liked.unshift(t); toast('已加入收藏'); }
-  persist(); syncLike(); if (S.tab === 'liked') render();
+  else { S.liked.unshift(cleanT(t)); toast('已加入收藏'); }
+  persistLib(); syncLike(); if (S.tab === 'liked') render();
 }
 function syncLike() {
   const t = cur(); const on = t && isLiked(t.id);
@@ -361,6 +601,7 @@ document.querySelectorAll('.seg button').forEach(b => b.onclick = () => {
 setIcon($('#fullClose'), 'down');
 setIcon($('#prevBtn'), 'prev'); setIcon($('#nextBtn'), 'next'); setIcon($('#miniNext'), 'next');
 setIcon($('#shuffleBtn'), 'shuffle');
+setIcon($('#addPlBtn'), 'plAdd');
 const syncModes = () => {
   $('#shuffleBtn').classList.toggle('off', !S.shuffle);
   setIcon($('#repeatBtn'), S.repeat === 'one' ? 'repeat1' : 'repeat');
@@ -370,6 +611,7 @@ $('#playBtn').onclick = togglePlay; $('#miniPlay').onclick = togglePlay;
 $('#nextBtn').onclick = () => next(); $('#miniNext').onclick = () => next();
 $('#prevBtn').onclick = prev;
 $('#likeBtn').onclick = () => toggleLike();
+$('#addPlBtn').onclick = () => { if (cur()) pickPlaylist([cur()]); };
 $('#shuffleBtn').onclick = () => { S.shuffle = !S.shuffle; persist(); syncModes(); toast(S.shuffle ? '隨機播放：開' : '隨機播放：關'); };
 $('#repeatBtn').onclick = () => {
   S.repeat = { off: 'all', all: 'one', one: 'off' }[S.repeat]; persist(); syncModes();
@@ -387,6 +629,9 @@ function parseLRC(lrc) {
   }
   return out.sort((a, b) => a.t - b.t).filter((l, i, arr) => l.text || (arr[i + 1] && arr[i + 1].t - l.t > 3));
 }
+
+let lastLine = -2;
+let userScrollUntil = 0;
 
 async function loadLyrics(t, token) {
   S.lyrics = null; lastLine = -2;
@@ -434,17 +679,12 @@ function bumpOffset(d) {
 $('#offMinus').onclick = () => bumpOffset(-0.5);
 $('#offPlus').onclick = () => bumpOffset(0.5);
 
-let lastLine = -2;
-let userScrollUntil = 0;
 $('#lyrics').addEventListener('touchmove', () => { userScrollUntil = Date.now() + 3000; }, { passive: true });
 $('#lyrics').addEventListener('wheel', () => { userScrollUntil = Date.now() + 3000; }, { passive: true });
 
 function syncLyrics(time) {
   const L = S.lyrics;
-  if (!L || !L.lines.length) {
-    $('#miniLyric').innerHTML = '';
-    return;
-  }
+  if (!L || !L.lines.length) { $('#miniLyric').innerHTML = ''; return; }
   const t = time + offset() + 0.15;
   let lo = 0, hi = L.lines.length - 1, idx = -1;
   while (lo <= hi) { const m = (lo + hi) >> 1; if (L.lines[m].t <= t) { idx = m; lo = m + 1; } else hi = m - 1; }
@@ -468,10 +708,10 @@ async function translateLyrics() {
   if (!L || !L.lines.length || L.translated) return;
   const id = L.id;
   const src = L.lines.map(l => l.text || '');
-  // skip if the lyrics already look like Traditional Chinese
-  const cjk = src.join('').match(/[\u4e00-\u9fff]/g)?.length || 0;
-  const kana = src.join('').match(/[\u3040-\u30ff\uac00-\ud7af]/g)?.length || 0;
-  if (cjk > src.join('').length * 0.5 && !kana) { toast('歌詞已是中文'); return; }
+  const all = src.join('');
+  const cjk = all.match(/[\u4e00-\u9fff]/g)?.length || 0;
+  const kana = all.match(/[\u3040-\u30ff\uac00-\ud7af]/g)?.length || 0;
+  if (cjk > all.length * 0.5 && !kana) { toast('歌詞已是中文'); return; }
   status('翻譯中…');
   try {
     const d = await api('/api/translate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: src, to: 'zh-TW' }) });
@@ -491,17 +731,22 @@ $('#transBtn').onclick = () => {
 
 // ---------- boot ----------
 syncModes();
+syncLike();
 setIcon($('#playBtn'), 'play'); setIcon($('#miniPlay'), 'play');
 $('#transBtn').classList.toggle('on', S.translate);
 if (cur()) {
   // restore last session without autoplay (browsers block it)
   updateMeta(cur());
-  audio.src = withKey('/api/stream/' + cur().id);
   audio.preload = 'none';
+  audio.src = withKey('/api/stream/' + cur().id);
   loadLyrics(cur(), ++loadToken);
-  audio.addEventListener('play', () => { audio.preload = 'auto'; }, { once: true });
 }
 render();
+pullLibrary();
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') pullLibrary();
+  else if (store.get('libDirty', false)) { clearTimeout(pushT); pushLibrary(); } // save before the app is backgrounded
+});
 
 // keyboard (desktop)
 document.addEventListener('keydown', e => {
