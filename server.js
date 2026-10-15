@@ -300,4 +300,4 @@ app.use(express.static(path.join(__dirname, 'public'), {
   },
 }));
 
-app.listen(PORT, () => console.log(`Vedia Music on :${PORT} (yt-dlp: ${YTDLP})`));
+app.listen(PORT, process.env.HOST || '0.0.0.0', () => console.log(`Vedia Music on :${PORT} (yt-dlp: ${YTDLP})`));
