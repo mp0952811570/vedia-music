@@ -15,6 +15,10 @@ const I = {
   repeat: '<svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>',
   repeat1: '<svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z"/></svg>',
   plAdd: '<svg viewBox="0 0 24 24"><path d="M3 6h12v2H3V6zm0 4h12v2H3v-2zm0 4h8v2H3v-2zm14-4h2v3h3v2h-3v3h-2v-3h-3v-2h3v-3z"/></svg>',
+  expand: '<svg viewBox="0 0 24 24"><path d="M4 4h6v2H6v4H4V4zm10 0h6v6h-2V6h-4V4zM4 14h2v4h4v2H4v-6zm14 0h2v6h-6v-2h4v-4z"/></svg>',
+  back10: '<svg viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z"/><text x="12" y="15.6" font-size="6.6" font-weight="800" text-anchor="middle">10</text></svg>',
+  fwd10: '<svg viewBox="0 0 24 24"><path d="M12 5V1l5 5-5 5V7a6 6 0 1 0 6 6h2a8 8 0 1 1-8-8z"/><text x="12" y="15.6" font-size="6.6" font-weight="800" text-anchor="middle">10</text></svg>',
+  collapse: '<svg viewBox="0 0 24 24"><path d="M8 4h2v6H4V8h4V4zm6 0h2v4h4v2h-6V4zM4 14h6v6H8v-4H4v-2zm10 0h6v2h-4v4h-2v-6z"/></svg>',
 };
 const setIcon = (el, name) => { if (el) el.innerHTML = I[name]; };
 
@@ -52,7 +56,15 @@ const S = {
   playlists: store.get('playlists', []), // [{id, name, tracks, created, updated}]
   libUpdated: store.get('libUpdated', 0),
   results: [],
-  tab: 'search',
+  home: null, // {chips, sections} from /api/home
+  homeChip: '', // selected mood chip ('' = everything)
+  homeBusy: false,
+  // playlist / album / artist pages opened on top of these tabs, newest last:
+  // {type, id, title, subtitle, cover, items, …, y = the scroll position to return to}
+  pages: { home: [], search: [] },
+  me: null, // {name, owner} for this device's code
+  friends: null, // owner only: [{id, name, key, created, lastSeen}]
+  tab: 'home',
   openPl: null,
   editPl: false,
   lyrics: null, // {id, lines:[{t,text,tr}], plain}
@@ -119,6 +131,62 @@ function toast(msg) {
 }
 const status = msg => { $('#status').textContent = msg || ''; };
 const isLiked = id => S.liked.some(x => x.id === id);
+
+// ---------- theme: the accent colour follows the artwork ----------
+// Same approach as Auralane (MIT, © 2026 adam10000423-oss): average the mid-tone pixels of a 32×32
+// copy of the cover, then keep the result saturated enough and mid-light so it reads on the dark UI.
+const DEFAULT_THEME = [41, 182, 246]; // Vedia blue until something plays
+let themeReq = 0;
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2;
+  if (max === min) return [0, 0, l];
+  const d = max - min, s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  const h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return [h / 6, s, l];
+}
+function hslToRgb(h, s, l) {
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+  const f = t => {
+    t = (t + 1) % 1;
+    return t < 1 / 6 ? p + (q - p) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p;
+  };
+  return [f(h + 1 / 3), f(h), f(h - 1 / 3)].map(v => Math.round(v * 255));
+}
+function applyTheme([r, g, b]) {
+  const css = document.documentElement.style;
+  const luma = 0.299 * r + 0.587 * g + 0.114 * b;
+  const lift = luma < 165 ? Math.min(0.58, 0.2 + ((165 - luma) / 165) * 0.5) : 0; // lighter tint for text on dark
+  css.setProperty('--theme', `${r}, ${g}, ${b}`);
+  css.setProperty('--theme-lite', [r, g, b].map(v => Math.round(v + (255 - v) * lift)).join(', '));
+  css.setProperty('--on-accent', luma > 150 ? '#101014' : '#f5f5f6');
+}
+function themeFromArtwork(url) {
+  const req = ++themeReq;
+  if (!url) return applyTheme(DEFAULT_THEME);
+  const img = new Image();
+  img.crossOrigin = 'anonymous'; // both cover CDNs answer with Access-Control-Allow-Origin: *
+  img.onload = () => {
+    if (req !== themeReq) return;
+    try {
+      const c = document.createElement('canvas');
+      c.width = c.height = 32;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0, 32, 32);
+      const px = ctx.getImageData(0, 0, 32, 32).data;
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let i = 0; i < px.length; i += 16) {
+        const l = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+        if (l > 20 && l < 235) { r += px[i]; g += px[i + 1]; b += px[i + 2]; n++; }
+      }
+      if (!n) return applyTheme(DEFAULT_THEME);
+      const [h, s, l] = rgbToHsl(r / n, g / n, b / n);
+      applyTheme(hslToRgb(h, Math.max(0.4, Math.min(0.85, s * 1.5)), Math.max(0.45, Math.min(0.65, l))));
+    } catch { applyTheme(DEFAULT_THEME); }
+  };
+  img.onerror = () => { if (req === themeReq) applyTheme(DEFAULT_THEME); };
+  img.src = url.replace(/=w\d+-h\d+/, '=w64-h64');
+}
 
 // generic bottom sheet; onPick receives the clicked button's dataset
 function sheet(html, onPick) {
@@ -228,8 +296,13 @@ function editRowHTML(t, i, n) {
     <button class="mini-btn danger" data-rm aria-label="移除">✕</button>
   </div>`;
 }
+const page = () => S.pages[S.tab]?.at(-1) || null;
+// shelves on screen: the open artist page's, else the home page's
+const pageSections = () => page()?.sections || (S.tab === 'home' ? S.home?.sections : null) || [];
 function listFor(tab) {
   if (tab === 'search') return S.results;
+  if (tab === 'col') return page()?.items || [];
+  if (tab.startsWith('sec:')) return pageSections()[Number(tab.slice(4))]?.items || [];
   if (tab === 'queue') return S.queue;
   if (tab === 'liked') return S.liked;
   if (tab === 'history') return S.history;
@@ -267,8 +340,27 @@ function renderPlDetail(el, p) {
     : `<div class="empty"><small>歌單是空的<br>在任何歌曲右邊的「⋯」選「加入歌單…」</small></div>`;
   el.innerHTML = head + body;
 }
+// Re-rendering (a song starting, a page finishing loading) must not throw horizontal rows back to
+// their start: chip rows keep their position within a tab, carousels within the same page.
+let shownView = null, shownTab = null;
 function render() {
   const el = $('#list');
+  moreObs?.disconnect();
+  const view = page() || (S.tab === 'home' ? S.home : S.tab);
+  const chipX = shownTab === S.tab && !page() ? el.querySelector('.chip-row')?.scrollLeft || 0 : 0;
+  const shelfX = view === shownView ? [...el.querySelectorAll('[data-shelf]')].map(s => s.scrollLeft) : [];
+  shownView = view; shownTab = S.tab;
+  draw(el);
+  const chips = el.querySelector('.chip-row');
+  if (chips && chipX) chips.scrollLeft = chipX;
+  el.querySelectorAll('[data-shelf]').forEach((s, i) => { if (shelfX[i]) s.scrollLeft = shelfX[i]; });
+}
+function draw(el) {
+  const pg = page();
+  if (pg) return pg.type === 'artist' ? renderArtist(el, pg) : renderCollection(el, pg);
+  if (S.tab === 'home') return renderHome(el);
+  if (S.tab === 'search') return renderSearch(el);
+  if (S.tab === 'users') return renderFriends(el);
   if (S.tab === 'playlists') {
     const p = S.openPl && getPl(S.openPl);
     if (p) return renderPlDetail(el, p);
@@ -276,16 +368,12 @@ function render() {
     return renderPlList(el);
   }
   const items = listFor(S.tab);
-  if (S.tab === 'search' && !items.length) {
-    el.innerHTML = `<div class="empty"><img src="/icons/icon-192.png" alt=""><p>MUSIC LIVES HERE</p><small>輸入歌名或歌手開始聽歌</small></div>`;
-    return;
-  }
   if (!items.length) {
     el.innerHTML = `<div class="empty"><small>${{ queue: '佇列是空的', liked: '還沒有收藏的歌曲', history: '還沒有播放紀錄' }[S.tab]}</small></div>`;
     return;
   }
   let head = '';
-  if (S.tab === 'queue') head = `<div class="section-title"><span>${items.length} 首${S.autoRadio ? ' · 自動接推薦歌曲' : ''}</span><span><button id="saveQ">存成歌單</button>　<button id="clearQ">清空</button></span></div>`;
+  if (S.tab === 'queue') head = `<div class="section-title"><span>${items.length} 首${S.repeat === 'all' ? ' · 循環播放' : S.autoRadio ? ' · 自動接推薦歌曲' : ''}</span><span><button id="saveQ">存成歌單</button>　<button id="clearQ">清空</button></span></div>`;
   if (S.tab === 'liked') head = `<div class="section-title"><span>${items.length} 首</span><span><button id="likedToPl">存成歌單</button>　<button id="playAllLiked">全部播放</button></span></div>`;
   el.innerHTML = head + items.map((t, i) => rowHTML(t, i, S.tab)).join('');
 }
@@ -293,6 +381,44 @@ function render() {
 $('#list').addEventListener('click', e => {
   const id = e.target.id;
   const p = S.openPl && getPl(S.openPl);
+  if (id === 'homeRefresh' || id === 'homeRetry') { loadHome(S.homeChip, true); return; }
+  if (id === 'pageBack') { closePage(); return; }
+  if (id === 'friendAdd') { addFriend(); return; }
+  const friend = e.target.closest('[data-friend]');
+  if (friend) { const u = S.friends?.[Number(friend.dataset.friend)]; if (u) friendSheet(u); return; }
+  const pg = page(), pgItems = pg?.items || [];
+  if (id === 'colPlay' && pgItems.length) { playList(pgItems, 0); return; }
+  if (id === 'colShuffle' && pgItems.length) {
+    S.shuffle = true; persist(); syncModes();
+    playList(pgItems, Math.floor(Math.random() * pgItems.length));
+    return;
+  }
+  if (id === 'colSave' && pgItems.length) {
+    const np = createPlaylist(pg.title, pgItems);
+    toast(`已存成歌單「${np.name}」（${np.tracks.length} 首）`);
+    return;
+  }
+  if (id === 'artistRadio' && pgItems.length) { playList([pgItems[0]], 0, true); return; }
+  if (id === 'artistAll' && pg?.allSongs) {
+    openPage({ type: 'playlist', id: pg.allSongs, title: `${pg.title} 全部歌曲`, subtitle: '', cover: pgItems[0]?.cover || '' });
+    return;
+  }
+  if (id === 'albumArtist' && pg?.artistId) { openPage({ type: 'artist', id: pg.artistId, title: pg.artist }); return; }
+  if (id === 'artistBio') { e.target.classList.toggle('open'); return; }
+  const stype = e.target.closest('[data-stype]');
+  if (stype) { if (stype.dataset.stype !== searchType) runSearch(searchQ, stype.dataset.stype); return; }
+  const chip = e.target.closest('[data-chip]');
+  if (chip) { if (chip.dataset.chip !== S.homeChip) loadHome(chip.dataset.chip); return; }
+  const card = e.target.closest('[data-card]');
+  if (card) {
+    const [si, i] = card.dataset.card.split(':').map(Number);
+    const item = pageSections()[si]?.items[i];
+    if (item?.type === 'song') playList([item], 0, true);
+    else if (item) openPage(item);
+    return;
+  }
+  const ent = e.target.closest('[data-ent]');
+  if (ent) { const item = S.results[Number(ent.dataset.ent)]; if (item) openPage(item); return; }
   if (id === 'clearQ') { const c = cur(); S.queue = c ? [c] : []; S.index = c ? 0 : -1; persist(); render(); return; }
   if (id === 'saveQ' || id === 'likedToPl') {
     const src = id === 'saveQ' ? S.queue : S.liked;
@@ -301,6 +427,7 @@ $('#list').addEventListener('click', e => {
     return;
   }
   if (id === 'playAllLiked') { playList(S.liked, 0); return; }
+  if (id === 'loadMore') { loadMoreResults(); return; }
   if (id === 'plNew') {
     const name = prompt('新歌單名稱');
     if (name && name.trim()) { const np = createPlaylist(name); S.openPl = np.id; S.editPl = false; render(); }
@@ -344,7 +471,7 @@ $('#list').addEventListener('click', e => {
   if (!items[i]) return;
   if (more) { openSheet(items[i], ctx, i); return; }
   if (ctx === 'queue') playIndex(i);
-  else if (ctx === 'search') playList([items[i]], 0, true);
+  else if (ctx === 'search' || ctx.startsWith('sec:')) playList([items[i]], 0, true);
   else playList(items, i);
 });
 
@@ -385,28 +512,318 @@ function openSheet(t, ctx, i) {
 }
 
 // tabs
+function setTab(tab) {
+  S.tab = tab;
+  document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x.dataset.tab === tab));
+}
 document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
-  if (b.dataset.tab === 'playlists' && S.tab === 'playlists') { S.openPl = null; S.editPl = false; }
-  document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x === b));
-  S.tab = b.dataset.tab; render(); window.scrollTo(0, 0);
+  const tab = b.dataset.tab;
+  if (tab === 'playlists' && S.tab === 'playlists') { S.openPl = null; S.editPl = false; }
+  if (tab === S.tab && S.pages[tab]) S.pages[tab] = []; // tapping the open tab again returns to its top
+  if (tab === 'home' && !S.home && !S.homeBusy) loadHome();
+  if (tab === 'users') loadFriends();
+  setTab(tab); render(); window.scrollTo(0, 0);
 });
 
+// ---------- friends (owner only) ----------
+// Each friend gets a link carrying their own code; their liked songs and playlists are kept
+// separately on the server. Only the owner's code sees the 朋友 tab.
+async function loadMe() {
+  try {
+    S.me = await api('/api/me');
+    $('.tabs button[data-tab="users"]').classList.toggle('hidden', !S.me.owner);
+    if (S.tab === 'home' && !page()) render(); // greets a friend by name
+  } catch {}
+}
+async function loadFriends() {
+  try { S.friends = (await api('/api/users')).users || []; }
+  catch { S.friends = S.friends || []; toast('朋友名單載入失敗'); }
+  if (S.tab === 'users') render();
+}
+const friendLink = u => `${location.origin}/?key=${encodeURIComponent(u.key)}`;
+const daysAgo = t => Math.round((new Date().setHours(0, 0, 0, 0) - new Date(t).setHours(0, 0, 0, 0)) / 86400000);
+const lastUsed = t => (!t ? '還沒用過' : ['今天', '昨天'][daysAgo(t)] || (daysAgo(t) < 7 ? `${daysAgo(t)} 天前` : `${new Date(t).getMonth() + 1}/${new Date(t).getDate()}`));
+
+function renderFriends(el) {
+  const F = S.friends;
+  const head = `<div class="page-head"><div><div class="eyebrow">分享</div><h1>朋友</h1>
+      <p>每位朋友有自己的連結，收藏和歌單各自獨立，互不影響。</p></div></div>
+    <div class="pl-actions"><button id="friendAdd" class="primary">＋ 新增朋友</button></div>`;
+  const body = !F ? '<div class="spinner"></div>'
+    : !F.length ? '<div class="empty"><small>還沒有朋友<br>按「新增朋友」產生他專屬的連結</small></div>'
+    : F.map((u, i) => `<div class="row" data-friend="${i}">
+        <span class="avatar">${esc([...u.name][0] || '?')}</span>
+        <div class="meta"><div class="t1">${esc(u.name)}</div><div class="t2">最近使用：${lastUsed(u.lastSeen)}</div></div>
+        <span class="chev">›</span>
+      </div>`).join('');
+  el.innerHTML = head + body + '<p class="note">播放器重新啟動後網址會改變，到時再從這裡把新連結傳給朋友。</p>';
+}
+
+async function addFriend() {
+  const name = prompt('朋友的名字');
+  if (!name || !name.trim()) return;
+  try {
+    const u = await api('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }) });
+    S.friends = [...(S.friends || []), u];
+    render();
+    friendSheet(u, true);
+  } catch { toast('新增失敗'); }
+}
+function copyText(text) {
+  if (!navigator.clipboard) { prompt('複製這個連結', text); return; }
+  navigator.clipboard.writeText(text).then(() => toast('已複製連結'), () => prompt('複製這個連結', text));
+}
+function friendSheet(u, isNew = false) {
+  const link = friendLink(u);
+  sheet(`<div class="sheet-title">${isNew ? `已新增「${esc(u.name)}」，把連結傳給他：` : `${esc(u.name)} 的連結`}<div class="link-text">${esc(link)}</div></div>
+    ${navigator.share ? '<button data-a="share" class="accent">分享連結…</button>' : ''}
+    <button data-a="copy">複製連結</button>
+    <button data-a="reset">重設連結（舊連結會失效）</button>
+    <button data-a="del" class="danger">刪除朋友</button>
+    <button data-x>取消</button>`, async d => {
+    if (d.a === 'share') navigator.share({ title: 'Vedia Music', text: `${u.name}，這是你的 Vedia Music 連結`, url: link }).catch(() => {});
+    if (d.a === 'copy') copyText(link);
+    if (d.a === 'reset' && confirm(`重設「${u.name}」的連結？舊連結會立刻失效，要把新連結再傳給他。`)) {
+      try {
+        Object.assign(u, await api(`/api/users/${u.id}/reset`, { method: 'POST' }));
+        render(); toast('已產生新連結'); friendSheet(u);
+      } catch { toast('重設失敗'); }
+    }
+    if (d.a === 'del' && confirm(`刪除「${u.name}」？他的連結會失效，收藏和歌單也會一起刪除。`)) {
+      try {
+        await api(`/api/users/${u.id}`, { method: 'DELETE' });
+        S.friends = S.friends.filter(x => x !== u);
+        render(); toast(`已刪除「${u.name}」`);
+      } catch { toast('刪除失敗'); }
+    }
+  });
+}
+
+// ---------- pages: playlist / album / artist ----------
+// Opened on top of the home or search tab (from anywhere else, on search); back returns to
+// the page underneath at the scroll position it was left at.
+async function openPage(item) {
+  if (S.tab !== 'home' && S.tab !== 'search') setTab('search');
+  const p = { ...item, items: null, y: window.scrollY };
+  S.pages[S.tab].push(p);
+  render(); window.scrollTo(0, 0);
+  try {
+    const d = await api(`/api/${item.type}/${encodeURIComponent(item.id)}`);
+    p.items = (d.items || []).map(cleanT);
+    p.title = p.title || d.name || '';
+    if (item.type === 'album') Object.assign(p, { artist: d.artist, artistId: d.artistId, cover: p.cover || d.cover });
+    if (item.type === 'artist') {
+      Object.assign(p, { title: d.name || p.title, description: d.description, listeners: d.listeners, subscribers: d.subscribers, banner: d.banner, allSongs: d.allSongs, sections: d.sections || [] });
+    }
+  } catch {
+    p.items = []; p.failed = true;
+  }
+  if (page() === p) render();
+}
+function closePage() {
+  const p = S.pages[S.tab]?.pop();
+  render(); window.scrollTo(0, p?.y || 0);
+}
+const backHTML = () => `<button id="pageBack" class="link back">‹ 返回</button>`;
+
+function renderCollection(el, c) {
+  const items = c.items || [];
+  const total = items.reduce((a, t) => a + (t.duration || 0), 0);
+  const info = c.items ? `${items.length} 首${total ? ' · ' + Math.round(total / 60) + ' 分鐘' : ''}` : '';
+  const head = `<div class="col-head">
+      ${backHTML()}
+      <div class="col-top">
+        <img class="col-cover" src="${esc(c.cover)}" alt="" onerror="this.style.visibility='hidden'">
+        <div class="col-meta">
+          <div class="eyebrow">${KIND[c.type] || ''}</div>
+          <div class="col-title">${esc(c.title)}</div>
+          ${c.artistId ? `<button id="albumArtist" class="link">${esc(c.artist)} ›</button>` : c.subtitle ? `<div class="t2 wrap">${esc(c.subtitle)}</div>` : ''}
+          <div class="t2">${info}</div>
+        </div>
+      </div>
+      ${items.length ? '<div class="pl-actions"><button id="colPlay" class="primary">▶ 播放</button><button id="colShuffle">隨機播放</button><button id="colSave">存成歌單</button></div>' : ''}
+    </div>`;
+  const body = !c.items ? '<div class="spinner"></div>'
+    : items.length ? items.map((t, i) => rowHTML(t, i, 'col')).join('')
+    : `<div class="empty"><small>${c.failed ? '載入失敗，請稍後再試' : '這裡沒有可以播放的歌曲'}</small></div>`;
+  el.innerHTML = head + body;
+}
+
+function renderArtist(el, a) {
+  const stats = [a.listeners, a.subscribers && `${a.subscribers} 位訂閱者`].filter(Boolean).join(' · ');
+  const hero = `<div class="artist-hero"${a.banner ? ` style="background-image:url('${esc(a.banner)}')"` : ''}>
+      ${backHTML()}
+      <div class="artist-name"><div class="eyebrow">歌手</div><h1>${esc(a.title)}</h1>${stats ? `<div class="t2">${esc(stats)}</div>` : ''}</div>
+    </div>`;
+  if (!a.items) { el.innerHTML = hero + '<div class="spinner"></div>'; return; }
+  if (!a.items.length && !a.sections?.length) {
+    el.innerHTML = hero + `<div class="empty"><small>${a.failed ? '載入失敗，請稍後再試' : '這位歌手沒有可以播放的歌曲'}</small></div>`;
+    return;
+  }
+  el.innerHTML = hero
+    + (a.description ? `<p id="artistBio" class="artist-bio">${esc(a.description)}</p>` : '')
+    + (a.items.length ? '<div class="pl-actions"><button id="colPlay" class="primary">▶ 播放</button><button id="colShuffle">隨機播放</button><button id="artistRadio">電台</button></div>' : '')
+    + (a.items.length ? `<section class="shelf"><div class="shelf-head"><h2>熱門歌曲</h2></div>${a.items.map((t, i) => rowHTML(t, i, 'col')).join('')}${a.allSongs ? '<button id="artistAll" class="ghost-btn more-btn">全部歌曲 ›</button>' : ''}</section>` : '')
+    + (a.sections || []).map(shelfHTML).join('');
+}
+
+// Now playing → the artist's page (a track only carries the artist's name, so look it up).
+async function openArtistByName(name) {
+  const q = String(name || '').split(/\s*[,、&/]\s*/)[0];
+  if (!q) return;
+  try {
+    const d = await api('/api/search?' + new URLSearchParams({ q, type: 'artists' }));
+    const a = d.items?.[0];
+    if (!a) { toast('找不到這位歌手'); return; }
+    if (full.classList.contains('open')) $('#fullClose').click();
+    openPage(a);
+  } catch { toast('找不到這位歌手'); }
+}
+
+// ---------- home ----------
+// YouTube Music's home page (Taiwan, signed out): mood chips plus shelves of quick picks,
+// playlists and new releases. Playlists / albums / artists open as a collection page.
+const KIND = { song: '歌曲', playlist: '歌單', album: '專輯', artist: '歌手' };
+const greeting = () => { const h = new Date().getHours(); return h >= 5 && h < 11 ? '早安' : h >= 11 && h < 18 ? '午安' : '晚安'; };
+let homeSeq = 0;
+
+async function loadHome(params = S.homeChip, fresh = false) {
+  const seq = ++homeSeq;
+  S.homeChip = params;
+  S.homeBusy = true;
+  if (S.tab === 'home' && !page()) render();
+  try {
+    const q = new URLSearchParams({ params });
+    if (fresh) q.set('fresh', '1');
+    const d = await api('/api/home?' + q);
+    if (seq !== homeSeq) return;
+    S.home = { chips: d.chips?.length ? d.chips : S.home?.chips || [], sections: d.sections || [] };
+  } catch {
+    if (seq !== homeSeq) return;
+    toast('首頁載入失敗，請稍後再試');
+    S.home = { chips: S.home?.chips || [], sections: [] };
+  } finally {
+    if (seq === homeSeq) S.homeBusy = false;
+  }
+  if (S.tab === 'home' && !page()) render();
+}
+
+function cardHTML(t, si, i) {
+  const playing = t.type === 'song' && cur()?.id === t.id ? ' playing' : '';
+  return `<button class="card${playing}" data-card="${si}:${i}">
+    <img loading="lazy"${t.type === 'artist' ? ' class="round"' : ''} src="${esc(t.cover)}" alt="" onerror="this.style.visibility='hidden'">
+    <span class="ct">${esc(t.title)}</span>
+    <span class="cs">${esc(t.subtitle || t.artist || KIND[t.type] || '')}</span>
+  </button>`;
+}
+function shelfHTML(s, si) {
+  const head = `<div class="shelf-head">${s.subtitle ? `<small>${esc(s.subtitle)}</small>` : ''}<h2>${esc(s.title)}</h2></div>`;
+  const body = s.layout === 'rows'
+    ? `<div class="shelf-rows" data-shelf style="grid-template-rows:repeat(${Math.min(4, s.items.length)},auto)">${s.items.map((t, i) => rowHTML(t, i, 'sec:' + si)).join('')}</div>`
+    : `<div class="shelf-cards" data-shelf>${s.items.map((t, i) => cardHTML(t, si, i)).join('')}</div>`;
+  return `<section class="shelf">${head}${body}</section>`;
+}
+function renderHome(el) {
+  const H = S.home;
+  const chips = H?.chips?.length ? [{ title: '全部', params: '' }, ...H.chips] : [];
+  let body;
+  if (!H || S.homeBusy) body = '<div class="spinner"></div>';
+  else if (!H.sections.length) body = '<div class="empty"><small>首頁暫時載入不了</small><br><button id="homeRetry" class="ghost-btn">再試一次</button></div>';
+  else body = H.sections.map(shelfHTML).join('');
+  el.innerHTML = `<div class="page-head">
+      <div><div class="eyebrow">Vedia Music</div><h1>${greeting()}${S.me?.name ? '，' + esc(S.me.name) : ''}</h1><p>今天想聽點什麼？</p></div>
+      <button id="homeRefresh" class="ghost-btn">重新整理</button>
+    </div>
+    ${chips.length ? `<div class="chip-row">${chips.map(c => `<button class="chip${c.params === S.homeChip ? ' on' : ''}" data-chip="${esc(c.params)}">${esc(c.title)}</button>`).join('')}</div>` : ''}
+    ${body}`;
+}
+
 // ---------- search ----------
-$('#searchForm').addEventListener('submit', async e => {
+// One result type at a time (songs, videos, albums, artists, playlists), 20 per page; nearing the
+// end of the list (or tapping 載入更多結果) loads the next page.
+const MAX_RESULTS = 400;
+const SEARCH_TYPES = [['songs', '歌曲'], ['videos', '影片'], ['albums', '專輯'], ['artists', '歌手'], ['playlists', '歌單']];
+let searchQ = '', searchType = 'songs', searchNext = null, searchSeq = 0, searchBusy = false, moreBusy = false;
+const moreObs = 'IntersectionObserver' in window
+  ? new IntersectionObserver(es => { if (es.some(x => x.isIntersecting)) loadMoreResults(); }, { rootMargin: '0px 0px 400px 0px' })
+  : null;
+
+$('#searchForm').addEventListener('submit', e => {
   e.preventDefault();
   const q = $('#searchInput').value.trim();
   if (!q) return;
   $('#searchInput').blur();
-  document.querySelectorAll('.tabs button').forEach(x => x.classList.toggle('on', x.dataset.tab === 'search'));
-  S.tab = 'search';
-  $('#list').innerHTML = '<div class="spinner"></div>';
-  try {
-    const d = await api('/api/search?q=' + encodeURIComponent(q));
-    S.results = d.items || [];
-    if (!S.results.length) toast('找不到結果');
-  } catch { toast('搜尋失敗，請稍後再試'); S.results = []; }
-  render();
+  setTab('search');
+  window.scrollTo(0, 0);
+  runSearch(q, 'songs');
 });
+
+async function runSearch(q, type) {
+  const seq = ++searchSeq;
+  searchQ = q; searchType = type; searchNext = null; S.results = []; S.pages.search = [];
+  searchBusy = true;
+  if (S.tab === 'search') render();
+  try {
+    const d = await api('/api/search?' + new URLSearchParams({ q, type }));
+    if (seq !== searchSeq) return;
+    S.results = d.items || [];
+    searchNext = d.next || null;
+  } catch {
+    if (seq !== searchSeq) return;
+    toast('搜尋失敗，請稍後再試');
+  } finally {
+    if (seq === searchSeq) searchBusy = false;
+  }
+  if (S.tab === 'search' && !page()) render();
+}
+
+// albums, artists and playlists open a page instead of playing
+function entityRowHTML(t, i) {
+  return `<div class="row" data-ent="${i}">
+    <img loading="lazy"${t.type === 'artist' ? ' class="round"' : ''} src="${esc(t.cover)}" alt="" onerror="this.style.visibility='hidden'">
+    <div class="meta"><div class="t1">${esc(t.title)}</div><div class="t2">${esc(t.subtitle || KIND[t.type] || '')}</div></div>
+    <span class="chev">›</span>
+  </div>`;
+}
+function renderSearch(el) {
+  if (!searchQ) {
+    el.innerHTML = `<div class="empty"><img src="/icons/icon-192.png" alt=""><p>MUSIC LIVES HERE</p><small>輸入歌名或歌手開始聽歌</small></div>`;
+    return;
+  }
+  const types = `<div class="chip-row">${SEARCH_TYPES.map(([k, label]) => `<button class="chip${k === searchType ? ' on' : ''}" data-stype="${k}">${label}</button>`).join('')}</div>`;
+  let body;
+  if (searchBusy) body = '<div class="spinner"></div>';
+  else if (!S.results.length) body = '<div class="empty"><small>找不到結果，換個關鍵字或分類試試</small></div>';
+  else body = S.results.map((t, i) => (t.type && t.type !== 'song' ? entityRowHTML(t, i) : rowHTML(t, i, 'search'))).join('')
+    + (searchNext ? '<div id="moreResults" class="more-results"><button id="loadMore">載入更多結果</button></div>' : '');
+  el.innerHTML = types + body;
+  const more = $('#moreResults');
+  if (more) moreObs?.observe(more);
+}
+
+async function loadMoreResults() {
+  if (!searchNext || moreBusy) return;
+  moreBusy = true;
+  const seq = searchSeq;
+  const btn = $('#loadMore');
+  if (btn) { btn.disabled = true; btn.textContent = '載入中…'; }
+  try {
+    const d = await api('/api/search?' + new URLSearchParams({ q: searchQ, type: searchType, next: searchNext }));
+    if (seq !== searchSeq) return;
+    const have = new Set(S.results.map(x => x.id));
+    const fresh = (d.items || []).filter(x => !have.has(x.id));
+    S.results.push(...fresh);
+    // stop at a page with nothing new (YouTube repeating itself) or a very long list
+    searchNext = fresh.length && S.results.length < MAX_RESULTS ? d.next || null : null;
+    if (S.tab === 'search' && !page()) render();
+  } catch {
+    if (seq !== searchSeq) return;
+    toast('載入更多失敗，請再試一次');
+    if (btn) { btn.disabled = false; btn.textContent = '載入更多結果'; }
+  } finally {
+    moreBusy = false;
+  }
+}
 
 // ---------- playback ----------
 let loadToken = 0;
@@ -415,21 +832,34 @@ let loadToken = 0;
 function playList(list, i, radio = false) {
   S.queue = list.map(cleanT);
   S.autoRadio = radio;
+  radioGen++;
   playIndex(i);
-  if (radio) fillRadio(list[i].id, true);
+  if (radio) fillRadio(list[i].id); // a new radio starts with recommendations even when looping
 }
 
-async function fillRadio(id, replaceRest = false) {
-  try {
-    const d = await api('/api/upnext/' + id);
-    const have = new Set(S.queue.map(x => x.id));
-    const add = (d.items || []).filter(x => !have.has(x.id));
-    if (replaceRest) S.queue = S.queue.slice(0, S.index + 1);
-    S.queue.push(...add);
-    persist();
-    if (S.tab === 'queue') render();
-    prefetchNext();
-  } catch {}
+// Appends recommended songs. One request at a time: two overlapping fills used to race, and the
+// one that cleared the rest of the queue could land last and leave only the current song.
+// radioGen changes with every new list, so a fill still loading for the old list is dropped.
+let radioGen = 0, radioFill = null;
+function fillRadio(id) {
+  if (radioFill?.gen === radioGen) return radioFill.p;
+  const gen = radioGen;
+  const p = (async () => {
+    try {
+      const d = await api('/api/upnext/' + id);
+      if (gen !== radioGen) return;
+      const have = new Set(S.queue.map(x => x.id));
+      S.queue.push(...(d.items || []).filter(x => !have.has(x.id)));
+      persist();
+      if (S.tab === 'queue') render();
+      prefetchNext();
+    } catch {
+    } finally {
+      if (radioFill?.p === p) radioFill = null;
+    }
+  })();
+  radioFill = { gen, p };
+  return p;
 }
 
 function playIndex(i) {
@@ -446,7 +876,8 @@ function playIndex(i) {
   audio.play().catch(err => { if (token === loadToken && err.name === 'NotAllowedError') status('點一下播放鍵開始'); });
   loadLyrics(t, token);
   render();
-  if (S.autoRadio && S.queue.length - S.index <= 3) fillRadio(t.id);
+  // looping the whole queue means playing it again, not growing it with recommendations
+  if (S.autoRadio && S.repeat !== 'all' && S.queue.length - S.index <= 3) fillRadio(t.id);
   else prefetchNext();
 }
 
@@ -465,7 +896,17 @@ function next(auto = false) {
     i = S.index + 1;
     if (i >= S.queue.length) {
       if (S.repeat === 'all') i = 0;
-      else { status('佇列已播完'); return; }
+      else if (S.autoRadio) {
+        // radio: recommendations still loading (or the last fetch failed) — get them, then go on
+        const at = S.index;
+        status('載入推薦歌曲…');
+        fillRadio(cur().id).then(() => {
+          if (S.index !== at) return;
+          if (S.queue.length > at + 1) playIndex(at + 1);
+          else status('佇列已播完');
+        });
+        return;
+      } else { status('佇列已播完'); return; }
     }
   }
   playIndex(i);
@@ -490,7 +931,7 @@ audio.addEventListener('error', () => {
   toast('無法播放：' + (cur()?.title || ''));
   setTimeout(() => next(), 1200);
 });
-audio.addEventListener('loadedmetadata', () => { $('#tDur').textContent = fmt(audio.duration); updatePosition(); });
+audio.addEventListener('loadedmetadata', () => { $('#tDur').textContent = fmt(dur()); updatePosition(); });
 
 function syncPlayIcons() {
   const p = audio.paused ? 'play' : 'pause';
@@ -499,25 +940,34 @@ function syncPlayIcons() {
 }
 
 // ---------- progress ----------
+// Track length for the UI. The server remuxes YouTube audio so browsers time it correctly, but a track
+// that still arrives as YouTube's fragmented m4a makes iOS Safari report about twice its length (the
+// extra half is silence), so a reported length far past the catalogue's is replaced by the catalogue's.
+function dur() {
+  const d = audio.duration, known = cur()?.duration || 0;
+  if (!d || !isFinite(d)) return known;
+  return known && d > known * 1.5 ? known : d;
+}
 let seeking = false;
 audio.addEventListener('timeupdate', () => {
-  const d = audio.duration || cur()?.duration || 0;
+  const d = dur();
   const c = audio.currentTime;
   const p = d ? (c / d) * 100 : 0;
   $('#miniBar').style.width = p + '%';
   if (!seeking) { $('#seek').value = d ? Math.round((c / d) * 1000) : 0; $('#seek').style.setProperty('--p', p + '%'); }
   $('#tCur').textContent = fmt(c);
   syncLyrics(c);
+  // inflated length (see dur): the real audio is over, skip the silent remainder
+  if (d && d < audio.duration - 5 && c > d + 1 && !audio.paused) next(true);
 });
 const seek = $('#seek');
 seek.addEventListener('input', () => {
   seeking = true;
-  const d = audio.duration || 0;
-  $('#tCur').textContent = fmt((seek.value / 1000) * d);
+  $('#tCur').textContent = fmt((seek.value / 1000) * dur());
   seek.style.setProperty('--p', seek.value / 10 + '%');
 });
 seek.addEventListener('change', () => {
-  const d = audio.duration || 0;
+  const d = dur();
   if (d) audio.currentTime = (seek.value / 1000) * d;
   seeking = false;
 });
@@ -529,7 +979,9 @@ function updateMeta(t) {
   $('#fullBg').style.backgroundImage = `url("${t.cover}")`;
   $('#miniTitle').textContent = t.title; $('#fullTitle').textContent = t.title;
   $('#miniArtist').textContent = t.artist; $('#fullArtist').textContent = t.artist + (t.album ? ' · ' + t.album : '');
+  $('#focusCover').src = t.cover; $('#focusTitle').textContent = t.title; $('#focusArtist').textContent = t.artist;
   $('#tCur').textContent = '0:00'; $('#tDur').textContent = fmt(t.duration);
+  themeFromArtwork(t.cover);
   syncLike();
   document.title = `${t.title} · Vedia Music`;
   if ('mediaSession' in navigator) {
@@ -545,24 +997,34 @@ function updateMeta(t) {
 function updatePosition() {
   if (!('mediaSession' in navigator) || !navigator.mediaSession.setPositionState) return;
   try {
-    if (audio.duration && isFinite(audio.duration))
-      navigator.mediaSession.setPositionState({ duration: audio.duration, position: Math.min(audio.currentTime, audio.duration), playbackRate: audio.playbackRate });
+    const d = dur();
+    if (d) navigator.mediaSession.setPositionState({ duration: d, position: Math.min(audio.currentTime, d), playbackRate: audio.playbackRate });
   } catch {}
 }
 audio.addEventListener('seeked', updatePosition);
 audio.addEventListener('play', updatePosition);
 
-if ('mediaSession' in navigator) {
+// Lock screen / Control Center buttons. iOS (WebKit) forgets handlers registered before the page is
+// "Now Playing", and again whenever playback restarts (first play, a new song); without previous /
+// next it falls back to ±10 s. So they are registered again each time playback starts, and the seek
+// actions are cleared explicitly (skipping 10 s lives in the player instead).
+function registerMediaActions() {
+  if (!('mediaSession' in navigator)) return;
   const ms = navigator.mediaSession;
   const h = (a, f) => { try { ms.setActionHandler(a, f); } catch {} };
   h('play', () => audio.play());
   h('pause', () => audio.pause());
-  h('nexttrack', () => next());
   h('previoustrack', () => prev());
+  h('nexttrack', () => next());
   h('seekto', d => { audio.currentTime = d.seekTime; updatePosition(); });
-  h('seekforward', d => { audio.currentTime = Math.min(audio.duration, audio.currentTime + (d.seekOffset || 10)); });
-  h('seekbackward', d => { audio.currentTime = Math.max(0, audio.currentTime - (d.seekOffset || 10)); });
+  h('seekforward', null);
+  h('seekbackward', null);
 }
+registerMediaActions();
+audio.addEventListener('playing', registerMediaActions);
+audio.addEventListener('loadedmetadata', registerMediaActions);
+window.addEventListener('pageshow', registerMediaActions);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') registerMediaActions(); });
 
 // like
 function toggleLike(t = cur()) {
@@ -579,8 +1041,9 @@ function syncLike() {
 
 // full player open/close
 const full = $('#full');
-const openFull = () => { full.classList.add('open'); full.setAttribute('aria-hidden', 'false'); history.pushState({ full: 1 }, ''); };
-const closeFull = () => { full.classList.remove('open'); full.setAttribute('aria-hidden', 'true'); };
+const openFull = () => { full.classList.add('open'); full.setAttribute('aria-hidden', 'false'); history.pushState({ full: 1 }, ''); startKaraoke(); };
+const closeFull = () => { setFocus(false); full.classList.remove('open'); full.setAttribute('aria-hidden', 'true'); };
+$('#fullArtist').onclick = () => openArtistByName(cur()?.artist);
 $('#miniOpen').onclick = openFull;
 $('#miniCover').onclick = openFull;
 $('#fullClose').onclick = () => (history.state?.full ? history.back() : closeFull());
@@ -594,19 +1057,29 @@ document.querySelectorAll('.seg button').forEach(b => b.onclick = () => {
   document.querySelectorAll('.seg button').forEach(x => x.classList.toggle('on', x === b));
   $('#viewCover').classList.toggle('on', b.dataset.view === 'cover');
   $('#viewLyrics').classList.toggle('on', b.dataset.view === 'lyrics');
-  lastLine = -2; syncLyrics(audio.currentTime);
+  lastLine = -2; syncLyrics(audio.currentTime); startKaraoke();
 });
 
 // controls
 setIcon($('#fullClose'), 'down');
 setIcon($('#prevBtn'), 'prev'); setIcon($('#nextBtn'), 'next'); setIcon($('#miniNext'), 'next');
-setIcon($('#shuffleBtn'), 'shuffle');
+setIcon($('#back10Btn'), 'back10'); setIcon($('#fwd10Btn'), 'fwd10');
 setIcon($('#addPlBtn'), 'plAdd');
+const REPEAT_LABEL = { off: '循環：關', all: '循環：全部', one: '循環：單曲' };
 const syncModes = () => {
-  $('#shuffleBtn').classList.toggle('off', !S.shuffle);
-  setIcon($('#repeatBtn'), S.repeat === 'one' ? 'repeat1' : 'repeat');
-  $('#repeatBtn').classList.toggle('off', S.repeat === 'off');
+  $('#shuffleBtn').innerHTML = `${I.shuffle}<span>隨機：${S.shuffle ? '開' : '關'}</span>`;
+  $('#shuffleBtn').classList.toggle('on', S.shuffle);
+  $('#repeatBtn').innerHTML = `${I[S.repeat === 'one' ? 'repeat1' : 'repeat']}<span>${REPEAT_LABEL[S.repeat]}</span>`;
+  $('#repeatBtn').classList.toggle('on', S.repeat !== 'off');
+  audio.loop = S.repeat === 'one'; // the browser restarts the song itself, also behind the lock screen
 };
+const skipBy = s => {
+  if (!audio.src) return;
+  audio.currentTime = Math.max(0, Math.min(dur() || Infinity, audio.currentTime + s));
+  updatePosition();
+};
+$('#back10Btn').onclick = () => skipBy(-10);
+$('#fwd10Btn').onclick = () => skipBy(10);
 $('#playBtn').onclick = togglePlay; $('#miniPlay').onclick = togglePlay;
 $('#nextBtn').onclick = () => next(); $('#miniNext').onclick = () => next();
 $('#prevBtn').onclick = prev;
@@ -615,53 +1088,50 @@ $('#addPlBtn').onclick = () => { if (cur()) pickPlaylist([cur()]); };
 $('#shuffleBtn').onclick = () => { S.shuffle = !S.shuffle; persist(); syncModes(); toast(S.shuffle ? '隨機播放：開' : '隨機播放：關'); };
 $('#repeatBtn').onclick = () => {
   S.repeat = { off: 'all', all: 'one', one: 'off' }[S.repeat]; persist(); syncModes();
-  toast({ off: '重複播放：關', all: '重複整個佇列', one: '單曲重複' }[S.repeat]);
+  toast({ off: '循環播放：關', all: S.autoRadio ? '循環播放目前的佇列（不再自動加入推薦歌曲）' : '循環播放整個佇列', one: '單曲循環' }[S.repeat]);
+  if (S.tab === 'queue') render();
 };
 
 // ---------- lyrics ----------
-function parseLRC(lrc) {
-  const out = [];
-  for (const raw of String(lrc).split(/\r?\n/)) {
-    const tags = [...raw.matchAll(/\[(\d+):(\d+(?:[.:]\d+)?)\]/g)];
-    if (!tags.length) continue;
-    const text = raw.replace(/\[[^\]]*\]/g, '').trim();
-    for (const m of tags) out.push({ t: Number(m[1]) * 60 + parseFloat(m[2].replace(':', '.')), text });
-  }
-  return out.sort((a, b) => a.t - b.t).filter((l, i, arr) => l.text || (arr[i + 1] && arr[i + 1].t - l.t > 3));
-}
-
+// /api/lyrics picks the best of several sources and returns timed lines, word timings when the
+// source has them (karaoke), the source's own translation when it has one, and every version it
+// found; a version chosen in the 來源 sheet is remembered per song.
 let lastLine = -2;
 let userScrollUntil = 0;
+const lyricPicks = store.get('lyricPicks', {}); // track id -> chosen lyrics version
+const LYRIC_KIND = { word: '逐字', line: '逐行', plain: '純文字' };
+const LYRIC_SOURCE_SHORT = { netease: '網易雲', kugou: '酷狗', better: 'Apple', lrclib: 'LRCLIB' }; // for the narrow button
 
 async function loadLyrics(t, token) {
   S.lyrics = null; lastLine = -2;
   $('#lyrics').innerHTML = '<div class="spinner"></div>';
   $('#miniLyric').innerHTML = '';
-  syncOffset();
+  syncOffset(); syncLyricSource();
   try {
-    const q = new URLSearchParams({ title: t.title, artist: t.artist, duration: t.duration || '' });
+    const q = new URLSearchParams({ title: t.title, artist: t.artist, album: t.album || '', duration: t.duration || '' });
+    if (lyricPicks[t.id]) q.set('pick', lyricPicks[t.id]);
     const d = await api('/api/lyrics?' + q);
     if (token !== loadToken) return;
-    if (d.synced) S.lyrics = { id: t.id, lines: parseLRC(d.synced), plain: '' };
-    else if (d.plain) S.lyrics = { id: t.id, lines: [], plain: d.plain };
-    else S.lyrics = { id: t.id, lines: [], plain: '' };
-  } catch { if (token === loadToken) S.lyrics = { id: t.id, lines: [], plain: '' }; }
-  renderLyrics();
+    // id = the track (translations check it); version = which lyrics version this is
+    S.lyrics = { ...d, version: d.id, id: t.id, lines: d.lines || [], options: d.options || [], hasTr: (d.lines || []).some(l => l.tr) };
+  } catch {
+    if (token === loadToken) S.lyrics = { id: t.id, kind: 'none', lines: [], plain: '', options: [] };
+  }
+  renderLyrics(); syncLyricSource();
   if (S.translate) translateLyrics();
 }
 
+function lineHTML(l, i) {
+  const words = l.w ? l.w.map(w => `<span class="w">${esc(w[2])}</span>`).join('') : esc(l.text);
+  return `<div class="ly${l.w ? ' kara' : ''}" data-i="${i}">${words || '♪'}${S.translate && l.tr ? `<span class="tr">${esc(l.tr)}</span>` : ''}</div>`;
+}
 function renderLyrics() {
   const L = S.lyrics, box = $('#lyrics');
   if (!L) return;
-  if (L.lines.length) {
-    box.innerHTML = L.lines.map((l, i) =>
-      `<div class="ly" data-i="${i}">${esc(l.text) || '♪'}${l.tr ? `<span class="tr">${esc(l.tr)}</span>` : ''}</div>`).join('');
-  } else if (L.plain) {
-    box.innerHTML = `<div class="ly-plain">${esc(L.plain)}</div>`;
-  } else {
-    box.innerHTML = '<div class="ly-none">這首歌暫時沒有歌詞</div>';
-  }
-  lastLine = -2; syncLyrics(audio.currentTime);
+  if (L.lines.length) box.innerHTML = L.lines.map(lineHTML).join('');
+  else if (L.plain) box.innerHTML = `<div class="ly-plain">${esc(L.plain)}</div>`;
+  else box.innerHTML = '<div class="ly-none">這首歌暫時沒有歌詞</div>';
+  lastLine = -2; syncLyrics(audio.currentTime); startKaraoke();
 }
 $('#lyrics').addEventListener('click', e => {
   const l = e.target.closest('.ly'); if (!l || !S.lyrics?.lines.length) return;
@@ -682,9 +1152,10 @@ $('#offPlus').onclick = () => bumpOffset(0.5);
 $('#lyrics').addEventListener('touchmove', () => { userScrollUntil = Date.now() + 3000; }, { passive: true });
 $('#lyrics').addEventListener('wheel', () => { userScrollUntil = Date.now() + 3000; }, { passive: true });
 
+let karaokeLine = null, karaokeWords = []; // the current line's element and word spans
 function syncLyrics(time) {
   const L = S.lyrics;
-  if (!L || !L.lines.length) { $('#miniLyric').innerHTML = ''; return; }
+  if (!L || !L.lines.length) { $('#miniLyric').innerHTML = ''; karaokeLine = null; return; }
   const t = time + offset() + 0.15;
   let lo = 0, hi = L.lines.length - 1, idx = -1;
   while (lo <= hi) { const m = (lo + hi) >> 1; if (L.lines[m].t <= t) { idx = m; lo = m + 1; } else hi = m - 1; }
@@ -693,24 +1164,90 @@ function syncLyrics(time) {
   const box = $('#lyrics');
   box.querySelectorAll('.ly.on').forEach(x => x.classList.remove('on'));
   const line = L.lines[idx];
-  $('#miniLyric').innerHTML = line ? `${esc(line.text)}${line.tr ? `<small>${esc(line.tr)}</small>` : ''}` : '';
+  $('#miniLyric').innerHTML = line ? `${esc(line.text)}${S.translate && line.tr ? `<small>${esc(line.tr)}</small>` : ''}` : '';
+  karaokeLine = null; karaokeWords = [];
   if (idx < 0) return;
   const el = box.querySelector(`.ly[data-i="${idx}"]`);
   if (!el) return;
   el.classList.add('on');
+  if (line.w) { karaokeLine = line; karaokeWords = [...el.querySelectorAll('.w')]; }
   if (Date.now() > userScrollUntil && $('#viewLyrics').classList.contains('on'))
-    box.scrollTo({ top: el.offsetTop - box.clientHeight * 0.38, behavior: 'smooth' });
+    box.scrollTo({ top: el.offsetTop - box.clientHeight * (full.classList.contains('focus') ? 0.32 : 0.38), behavior: 'smooth' });
 }
 
-// translation
+// Karaoke: every frame while the lyrics are on screen, fill each word of the current line as far as
+// it has been sung (timeupdate only fires ~4×/s, too coarse for a word).
+let karaokeRaf = 0;
+function karaokeFrame() {
+  karaokeRaf = 0;
+  if (audio.paused || !full.classList.contains('open') || !$('#viewLyrics').classList.contains('on')) return;
+  const t = audio.currentTime + offset();
+  syncLyrics(audio.currentTime);
+  if (karaokeLine) {
+    karaokeLine.w.forEach((w, j) => {
+      const p = t <= w[0] ? 0 : t >= w[1] ? 100 : ((t - w[0]) / (w[1] - w[0])) * 100;
+      karaokeWords[j]?.style.setProperty('--p', p.toFixed(1) + '%');
+    });
+  }
+  karaokeRaf = requestAnimationFrame(karaokeFrame);
+}
+function startKaraoke() { if (!karaokeRaf && S.lyrics?.kind === 'word') karaokeRaf = requestAnimationFrame(karaokeFrame); }
+audio.addEventListener('play', startKaraoke);
+audio.addEventListener('seeked', () => { lastLine = -2; syncLyrics(audio.currentTime); });
+
+// source picker: every version the server found, the current one highlighted
+function syncLyricSource() {
+  const L = S.lyrics;
+  $('#lySource').textContent = !L ? '歌詞' : L.kind === 'none' ? '沒有歌詞' : `${LYRIC_SOURCE_SHORT[L.source] || L.sourceName || '歌詞'} · ${LYRIC_KIND[L.kind] || ''}`;
+}
+$('#lySource').onclick = () => {
+  const L = S.lyrics, t = cur();
+  if (!L || !t) return;
+  const rows = L.options.map((o, i) => `<button data-o="${i}"${o.id === L.version ? ' class="accent"' : ''}>${esc(o.sourceName)} · ${LYRIC_KIND[o.kind] || ''}${o.id === L.version ? '（使用中）' : ''}
+      <small class="block">${esc(o.title)}${o.artist ? ' — ' + esc(o.artist) : ''}${o.duration ? ' · ' + fmt(o.duration) : ''}</small></button>`).join('');
+  sheet(`<div class="sheet-title">選擇歌詞版本</div><div class="sheet-scroll">${rows || '<div class="sheet-title">找不到其他版本</div>'}</div><button data-x>取消</button>`, d => {
+    const o = L.options[Number(d.o)];
+    if (!o || o.id === L.version) return;
+    lyricPicks[t.id] = o.id;
+    const ids = Object.keys(lyricPicks);
+    if (ids.length > 300) delete lyricPicks[ids[0]];
+    store.set('lyricPicks', lyricPicks);
+    loadLyrics(t, loadToken);
+  });
+};
+
+// full-screen lyrics: only the lyrics, bigger, with the essential controls; keeps the screen awake
+let wakeLock = null;
+async function setFocus(on) {
+  full.classList.toggle('focus', on);
+  setIcon($('#lyFocus'), on ? 'collapse' : 'expand');
+  if (on) {
+    document.querySelector('.seg button[data-view="lyrics"]').click();
+    try { wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
+  } else {
+    wakeLock?.release?.().catch(() => {}); wakeLock = null;
+  }
+  lastLine = -2; syncLyrics(audio.currentTime);
+}
+setIcon($('#lyFocus'), 'expand'); setIcon($('#focusExit'), 'collapse');
+$('#lyFocus').onclick = () => setFocus(!full.classList.contains('focus'));
+$('#focusExit').onclick = () => setFocus(false);
+document.addEventListener('visibilitychange', async () => {
+  // the browser drops the wake lock when the app is hidden; take it again on return
+  if (document.visibilityState === 'visible' && full.classList.contains('focus') && !wakeLock) {
+    try { wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
+  }
+});
+
+// translation: the source's own when it has one, otherwise machine translation (Google)
 async function translateLyrics() {
   const L = S.lyrics;
-  if (!L || !L.lines.length || L.translated) return;
+  if (!L || !L.lines.length || L.hasTr || L.translated) return;
   const id = L.id;
   const src = L.lines.map(l => l.text || '');
   const all = src.join('');
-  const cjk = all.match(/[\u4e00-\u9fff]/g)?.length || 0;
-  const kana = all.match(/[\u3040-\u30ff\uac00-\ud7af]/g)?.length || 0;
+  const cjk = all.match(/[一-鿿]/g)?.length || 0;
+  const kana = all.match(/[぀-ヿ가-힯]/g)?.length || 0;
   if (cjk > all.length * 0.5 && !kana) { toast('歌詞已是中文'); return; }
   status('翻譯中…');
   try {
@@ -726,7 +1263,7 @@ $('#transBtn').onclick = () => {
   S.translate = !S.translate; persist();
   $('#transBtn').classList.toggle('on', S.translate);
   if (S.translate) translateLyrics();
-  else if (S.lyrics) { S.lyrics.lines.forEach(l => delete l.tr); S.lyrics.translated = false; renderLyrics(); }
+  renderLyrics();
 };
 
 // ---------- boot ----------
@@ -742,6 +1279,8 @@ if (cur()) {
   loadLyrics(cur(), ++loadToken);
 }
 render();
+loadHome();
+loadMe();
 pullLibrary();
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') pullLibrary();

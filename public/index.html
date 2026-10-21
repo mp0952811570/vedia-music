@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Vedia Music</title>
   <meta name="description" content="Vedia Music — Music lives here">
-  <meta name="theme-color" content="#071530">
+  <meta name="theme-color" content="#0b0b0c">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -25,11 +25,13 @@
   </header>
 
   <nav class="tabs">
-    <button data-tab="search" class="on">搜尋</button>
+    <button data-tab="home" class="on">首頁</button>
+    <button data-tab="search">搜尋</button>
     <button data-tab="playlists">歌單</button>
     <button data-tab="liked">收藏</button>
     <button data-tab="queue">播放佇列</button>
     <button data-tab="history">最近播放</button>
+    <button data-tab="users" class="hidden">朋友</button>
   </nav>
 
   <main id="list" class="list"></main>
@@ -62,6 +64,12 @@
         </div>
       </div>
 
+      <div class="focus-bar">
+        <img id="focusCover" alt="">
+        <div class="meta"><div id="focusTitle" class="t1"></div><div id="focusArtist" class="t2"></div></div>
+        <button id="focusExit" class="icon-btn sm" aria-label="離開全螢幕歌詞"></button>
+      </div>
+
       <div class="views">
         <div class="view-cover on" id="viewCover">
           <img id="fullCover" alt="">
@@ -70,10 +78,12 @@
         <div class="view-lyrics" id="viewLyrics">
           <div class="lyrics" id="lyrics"></div>
           <div class="lyric-tools">
-            <button id="offMinus">-0.5s</button>
+            <button id="lySource" class="ly-source">歌詞</button>
+            <button id="offMinus" aria-label="歌詞提早 0.5 秒">-0.5</button>
             <span id="offVal">0.0s</span>
-            <button id="offPlus">+0.5s</button>
+            <button id="offPlus" aria-label="歌詞延後 0.5 秒">+0.5</button>
             <button id="transBtn">翻譯</button>
+            <button id="lyFocus" class="icon-btn sm" aria-label="全螢幕歌詞"></button>
           </div>
         </div>
       </div>
@@ -89,11 +99,15 @@
       </div>
 
       <div class="controls">
-        <button id="shuffleBtn" class="icon-btn sm off" aria-label="隨機"></button>
         <button id="prevBtn" class="icon-btn" aria-label="上一首"></button>
+        <button id="back10Btn" class="icon-btn skip" aria-label="倒轉 10 秒"></button>
         <button id="playBtn" class="play-btn" aria-label="播放/暫停"></button>
+        <button id="fwd10Btn" class="icon-btn skip" aria-label="快轉 10 秒"></button>
         <button id="nextBtn" class="icon-btn" aria-label="下一首"></button>
-        <button id="repeatBtn" class="icon-btn sm off" aria-label="重複"></button>
+      </div>
+      <div class="modes">
+        <button id="shuffleBtn" class="mode" aria-label="隨機播放"></button>
+        <button id="repeatBtn" class="mode" aria-label="循環播放"></button>
       </div>
       <div class="status" id="status"></div>
     </div>

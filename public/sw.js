@@ -1,7 +1,7 @@
 // Vedia Music service worker
 // App shell: network-first (so updates land immediately), cache fallback when offline.
 // /api/* and audio streams are never cached here (audio needs Range requests).
-const VERSION = 'vedia-v3';
+const VERSION = 'vedia-v8';
 const SHELL = [
   '/', '/index.html', '/style.css', '/app.js', '/manifest.json',
   '/icons/icon-192.png', '/icons/icon-512.png', '/icons/logo-mark.png', '/icons/icon-180.png',
@@ -24,8 +24,9 @@ self.addEventListener('fetch', e => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
 
-  // cover art from Google CDN: cache-first
-  if (/googleusercontent\.com|ytimg\.com/.test(url.hostname)) {
+  // cover art from Google CDN: cache-first. CORS requests (sampling the artwork colour) go
+  // straight to the network: a cached opaque copy of the same image would fail their CORS check.
+  if (/googleusercontent\.com|ytimg\.com/.test(url.hostname) && req.mode !== 'cors') {
     e.respondWith(
       caches.open(VERSION + '-img').then(async c => {
         const hit = await c.match(req);
