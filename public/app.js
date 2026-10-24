@@ -878,38 +878,68 @@ function playIndex(i) {
   render();
   // looping the whole queue means playing it again, not growing it with recommendations
   if (S.autoRadio && S.repeat !== 'all' && S.queue.length - S.index <= 3) fillRadio(t.id);
-  else prefetchNext();
+  prefetchNext();
 }
 
+// The next song must already be on the server when this one ends. With the screen locked, iOS
+// suspends the page a moment after the sound stops: a next song that still has to be fetched from
+// YouTube (several seconds), or one that turns out to be unplayable, leaves the player silent until
+// the app is opened again. So the next song is picked in advance — also in shuffle — and prepared
+// while this one plays, and songs the server can't play are skipped before their turn comes.
+const badIds = new Map(); // id -> time until which it's skipped
+const isBad = id => (badIds.get(id) || 0) > Date.now();
+const markBad = id => badIds.set(id, Date.now() + 10 * 60 * 1000);
+let shufflePick = null; // {from, i, id}: the shuffle choice for after the current song
+function chooseNext() {
+  const n = S.queue.length;
+  const ok = i => i !== S.index && !isBad(S.queue[i].id);
+  if (S.shuffle && n > 1) {
+    const c = [...Array(n).keys()].filter(ok);
+    return c.length ? c[Math.floor(Math.random() * c.length)] : -1;
+  }
+  for (let i = S.index + 1; i < n; i++) if (ok(i)) return i;
+  if (S.repeat === 'all') for (let i = 0; i < S.index; i++) if (ok(i)) return i;
+  return -1;
+}
+function nextIndex() {
+  if (!S.shuffle) return chooseNext(); // in order: follows queue edits as they happen
+  const p = shufflePick;
+  if (p && p.from === S.index && S.queue[p.i]?.id === p.id && !isBad(p.id)) return p.i;
+  const i = chooseNext();
+  shufflePick = i < 0 ? null : { from: S.index, i, id: S.queue[i].id };
+  return i;
+}
+const prepared = new Set();
 function prefetchNext() {
-  const n = S.queue[S.index + 1];
-  if (n) fetch(withKey('/api/prepare/' + n.id)).catch(() => {});
+  const i = nextIndex();
+  if (i < 0) return;
+  const id = S.queue[i].id;
+  if (prepared.has(id)) return;
+  prepared.add(id);
+  fetch(withKey('/api/prepare/' + id)).then(r => {
+    if (r.ok) return;
+    prepared.delete(id);
+    if (r.status === 502) { markBad(id); prefetchNext(); } // unplayable: pick and prepare another
+  }).catch(() => prepared.delete(id));
 }
 
 function next(auto = false) {
   if (!S.queue.length) return;
   if (auto && S.repeat === 'one') { audio.currentTime = 0; audio.play(); return; }
-  let i;
-  if (S.shuffle && S.queue.length > 1) {
-    do { i = Math.floor(Math.random() * S.queue.length); } while (i === S.index);
-  } else {
-    i = S.index + 1;
-    if (i >= S.queue.length) {
-      if (S.repeat === 'all') i = 0;
-      else if (S.autoRadio) {
-        // radio: recommendations still loading (or the last fetch failed) — get them, then go on
-        const at = S.index;
-        status('載入推薦歌曲…');
-        fillRadio(cur().id).then(() => {
-          if (S.index !== at) return;
-          if (S.queue.length > at + 1) playIndex(at + 1);
-          else status('佇列已播完');
-        });
-        return;
-      } else { status('佇列已播完'); return; }
-    }
+  const i = nextIndex();
+  if (i >= 0) { playIndex(i); return; }
+  if (S.autoRadio && S.repeat !== 'all') {
+    // radio: recommendations still loading (or the last fetch failed) — get them, then go on
+    const at = S.index;
+    status('載入推薦歌曲…');
+    fillRadio(cur().id).then(() => {
+      if (S.index !== at) return;
+      const j = nextIndex();
+      if (j >= 0) playIndex(j); else status('佇列已播完');
+    });
+    return;
   }
-  playIndex(i);
+  status('佇列已播完');
 }
 function prev() {
   if (audio.currentTime > 4 || S.index <= 0) { audio.currentTime = 0; return; }
@@ -922,20 +952,26 @@ function togglePlay() {
 
 audio.addEventListener('play', syncPlayIcons);
 audio.addEventListener('pause', syncPlayIcons);
-audio.addEventListener('playing', () => status(''));
+// also covers resuming a restored session with the play button, which doesn't go through playIndex
+audio.addEventListener('playing', () => { status(''); prefetchNext(); });
 audio.addEventListener('waiting', () => status('緩衝中…'));
 audio.addEventListener('ended', () => next(true));
 audio.addEventListener('error', () => {
   if (!audio.src) return;
+  if (cur()) markBad(cur().id);
   status('這首歌無法播放，跳到下一首');
   toast('無法播放：' + (cur()?.title || ''));
-  setTimeout(() => next(), 1200);
+  // straight away: a timer may not run again while the screen is locked
+  next();
 });
 audio.addEventListener('loadedmetadata', () => { $('#tDur').textContent = fmt(dur()); updatePosition(); });
 
 function syncPlayIcons() {
   const p = audio.paused ? 'play' : 'pause';
   setIcon($('#playBtn'), p); setIcon($('#miniPlay'), p);
+  // a song ending on its own also fires "pause"; telling iOS "paused" then can end the background
+  // audio session before the next song starts, so the lock screen keeps saying "playing"
+  if (audio.ended && (S.repeat === 'one' || S.autoRadio || nextIndex() >= 0)) return;
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = audio.paused ? 'paused' : 'playing';
 }
 
