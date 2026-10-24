@@ -871,6 +871,9 @@ function playIndex(i) {
   persist();
   updateMeta(t);
   status('載入中…');
+  audio.muted = false;
+  lastTime = 0;
+  if (!audio.paused) audio.pause(); // pause first: unlike a natural end, a pause keeps iOS's audio session
   audio.preload = 'auto';
   audio.src = withKey('/api/stream/' + t.id);
   audio.play().catch(err => { if (token === loadToken && err.name === 'NotAllowedError') status('點一下播放鍵開始'); });
@@ -925,26 +928,52 @@ function prefetchNext() {
 
 function next(auto = false) {
   if (!S.queue.length) return;
-  if (auto && S.repeat === 'one') { audio.currentTime = 0; audio.play(); return; }
+  if (auto && S.repeat === 'one') { seekTo(0); audio.play(); return; }
   const i = nextIndex();
   if (i >= 0) { playIndex(i); return; }
   if (S.autoRadio && S.repeat !== 'all') {
-    // radio: recommendations still loading (or the last fetch failed) — get them, then go on
+    // radio: recommendations still loading (or the last fetch failed) — get them, then go on.
+    // Meanwhile the song keeps looping muted, so iOS keeps the audio session open behind the lock.
     const at = S.index;
     status('載入推薦歌曲…');
+    if (auto) audio.muted = true;
     fillRadio(cur().id).then(() => {
       if (S.index !== at) return;
       const j = nextIndex();
-      if (j >= 0) playIndex(j); else status('佇列已播完');
+      if (j >= 0) playIndex(j); else endOfQueue();
     });
     return;
   }
+  endOfQueue();
+}
+function endOfQueue() {
   status('佇列已播完');
+  if (audio.loop) { audio.pause(); seekTo(0); }
+  audio.muted = false;
 }
 function prev() {
-  if (audio.currentTime > 4 || S.index <= 0) { audio.currentTime = 0; return; }
+  if (audio.currentTime > 4 || S.index <= 0) { seekTo(0); return; }
   playIndex(S.index - 1);
 }
+
+// iOS closes the page's audio session when a song plays to its natural end, and behind the lock
+// screen it won't let the page open it again: the next song then shows as playing but stays
+// silent until the app is opened. So songs never end: the element always loops, and the jump from
+// the end back to 0:00 is what moves on to the next song (switched in the same event, no timer).
+let lastTime = 0, manualSeek = null; // {t, at}: a seek made by the player itself, not the loop
+function seekTo(t) { manualSeek = { t, at: Date.now() }; audio.currentTime = t; }
+function checkWrap() {
+  const from = lastTime, to = audio.currentTime;
+  lastTime = to;
+  const m = manualSeek;
+  if (m && Date.now() - m.at < 1500 && Math.abs(to - m.t) < 0.5) return;
+  if (!(from > 3 && to < 1.5 && from - to > 2)) return;
+  if (S.repeat === 'one') return; // the loop itself is the repeat
+  next(true);
+}
+audio.loop = true;
+audio.addEventListener('seeking', checkWrap);
+try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch {}
 function togglePlay() {
   if (!audio.src) { if (cur()) playIndex(S.index); return; }
   audio.paused ? audio.play() : audio.pause();
@@ -988,6 +1017,7 @@ let seeking = false;
 audio.addEventListener('timeupdate', () => {
   const d = dur();
   const c = audio.currentTime;
+  if (!audio.seeking) checkWrap(); // fallback if a browser loops without a seeking event
   const p = d ? (c / d) * 100 : 0;
   $('#miniBar').style.width = p + '%';
   if (!seeking) { $('#seek').value = d ? Math.round((c / d) * 1000) : 0; $('#seek').style.setProperty('--p', p + '%'); }
@@ -1004,7 +1034,7 @@ seek.addEventListener('input', () => {
 });
 seek.addEventListener('change', () => {
   const d = dur();
-  if (d) audio.currentTime = (seek.value / 1000) * d;
+  if (d) seekTo((seek.value / 1000) * d);
   seeking = false;
 });
 
@@ -1052,7 +1082,7 @@ function registerMediaActions() {
   h('pause', () => audio.pause());
   h('previoustrack', () => prev());
   h('nexttrack', () => next());
-  h('seekto', d => { audio.currentTime = d.seekTime; updatePosition(); });
+  h('seekto', d => { seekTo(d.seekTime); updatePosition(); });
   h('seekforward', null);
   h('seekbackward', null);
 }
@@ -1107,11 +1137,11 @@ const syncModes = () => {
   $('#shuffleBtn').classList.toggle('on', S.shuffle);
   $('#repeatBtn').innerHTML = `${I[S.repeat === 'one' ? 'repeat1' : 'repeat']}<span>${REPEAT_LABEL[S.repeat]}</span>`;
   $('#repeatBtn').classList.toggle('on', S.repeat !== 'off');
-  audio.loop = S.repeat === 'one'; // the browser restarts the song itself, also behind the lock screen
+  audio.loop = true; // always (see checkWrap): repeat-one simply doesn't move on at the wrap
 };
 const skipBy = s => {
   if (!audio.src) return;
-  audio.currentTime = Math.max(0, Math.min(dur() || Infinity, audio.currentTime + s));
+  seekTo(Math.max(0, Math.min(dur() || Infinity, audio.currentTime + s)));
   updatePosition();
 };
 $('#back10Btn').onclick = () => skipBy(-10);
@@ -1171,7 +1201,7 @@ function renderLyrics() {
 }
 $('#lyrics').addEventListener('click', e => {
   const l = e.target.closest('.ly'); if (!l || !S.lyrics?.lines.length) return;
-  audio.currentTime = Math.max(0, S.lyrics.lines[l.dataset.i].t - offset());
+  seekTo(Math.max(0, S.lyrics.lines[l.dataset.i].t - offset()));
 });
 
 const offset = () => (cur() && S.offsets[cur().id]) || 0;
